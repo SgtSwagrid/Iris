@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+    # Cancel in-progress runs when starting a new one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  build-integrity:
+    name: Build Integrity
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: "temurin"
+          cache: sbt
+
+      - name: Install SBT
+        uses: sbt/setup-sbt@v1
+
+      - name: Linter
+        run: sbt scalafmtCheckAll
+
+      - name: Build
+        run: sbt 'set ThisBuild / scalacOptions += "-Werror"; compile'
+
+      - name: Test
+        run: sbt test

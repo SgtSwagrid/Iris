@@ -1,0 +1,12 @@
+name: Import Rulesets
+on:
+  push:
+    paths:
+      - .github/rulesets/**
+      - .github/settings.json
+  workflow_dispatch:
+
+jobs:
+  import:
+    uses: SgtSwagrid/github-rules/.github/workflows/import-rulesets.yml@main
+    secrets: inherit
