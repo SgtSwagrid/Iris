@@ -4,24 +4,34 @@ import sbt.Keys._
 import sbtunidoc.BaseUnidocPlugin.autoImport.*
 import sbtunidoc.ScalaUnidocPlugin
 
-ThisBuild / scalaVersion := "3.8.4"
+// This build is developed as part of a larger private project,
+// which includes it by reference and from which it is automatically synchronised.
+// The project is named after the library, so that it doesn't clash with a host's own.
 
-scalacOptions ++= Seq(
+val scala3 = "3.8.4"
+
+ThisBuild / scalaVersion := scala3
+
+ThisBuild / scalacOptions ++= Seq(
   "-explain",
   "-explain-types",
   "-explain-cyclic",
 )
 
-lazy val `scala-library-template` = project
+/**
+  * A provider-agnostic client for the APIs of large language models, with an
+  * adapter for each supported provider. JVM only, as it makes its requests
+  * through the JDK's own HTTP client.
+  */
+lazy val iris = project
   .in(file("."))
   .enablePlugins(ScalaUnidocPlugin)
   .settings(
-    packagePrefix                          := "com.alecdorrington",
-    libraryDependencies += "org.scalameta" %% "munit" % "1.3.3" % Test,
-
-    // Workaround for an sbt 2.0.x classloader bug where in-process test runs
-    // can't see Test-scoped dependencies (NoClassDefFoundError: munit/FunSuite).
-    Test / fork := true,
-    ScalaUnidoc / unidoc / scalacOptions ++=
-      Seq("-project", "Scala Library Template"),
+    name          := "iris",
+    packagePrefix := "com.alecdorrington.iris",
+    Dependencies.sttpClient,
+    Dependencies.circe,
+    Dependencies.cats,
+    Dependencies.munit,
+    ScalaUnidoc / unidoc / scalacOptions ++= Seq("-project", "Iris"),
   )

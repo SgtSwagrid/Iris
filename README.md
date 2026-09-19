@@ -1,156 +1,115 @@
 <div align="center">
-  <h1>📚 Scala Library Template</h1>
-  <p>A reusable template for Scala libraries deployed to <a href="https://central.sonatype.com/">Maven Central</a>.</p>
-</div>
 
-<br><br>
+  <h1>🌈 Iris</h1>
+  <p>A provider-agnostic <a href="https://www.scala-lang.org/">Scala</a> client for large language models.</p>
 
-> "Perfection is achieved not when there is nothing more to add, but when there is nothing left to take away." — Antoine de Saint-Exupéry.
-
-<br>
-
-## 📋 What's included?
-
-1. Everything from [Scala Library Config](https://github.com/SgtSwagrid/scala-library-config), including reasonable [Scalafmt](https://scalameta.org/scalafmt/) settings, CI piplines for build integrity, and some IDE config.
-2. Automatic deployment to Maven Central using [sbt-ci-release](https://github.com/sbt/sbt-ci-release).
-3. Example build configuration and setup instructions.
-
-## 🔨 How to use this template
-
-### 1. Create your repository
-
-Click '[**Use this template**](https://github.com/new?template_name=scala-library-template&template_owner=SgtSwagrid)' on GitHub, and follow the instructions to create a new repository for your library.
-All files herein will be copied as-is.
-
-### 2. Configure [build.sbt](build.sbt) and [release.sbt](release.sbt)
-
-Replace every placeholder with real values for your project.
-The sbt settings necessary for publishing are defined by `sbt-ci-release` and are documented [here](https://github.com/sbt/sbt-ci-release?tab=readme-ov-file#sbt).
-
-#### Settings to update in `release.sbt`:
-
-| Name | Purpose | Example |
-| ---- | ------- | ------- |
-| `organization` | Your organisation's package namespace. | `org.nohungrydogs` |
-| `organizationName` | Your organisation's name. | `No Hungry Dogs` |
-| `organizationHomepage` | Your organisation's website. | `nohungrydogs.org` |
-| [`versionScheme`](https://www.scala-sbt.org/1.x/docs/Publishing.html#Version+scheme) | What does the version number say about binary compatibility? | `strict` |
-| `licenses` | The license under which your library is released. Update [`LICENSE.md`](LICENSE.md) to match. | [`MIT`](https://opensource.org/license/mit) |
-| `developers` | The individual developers who contribute to your library. | `SgtSwagrid` |
-
-#### Settings to update in `build.sbt`:
-
-| Name | Purpose | Example |
-| ---- | ------- | ------- |
-| `packagePrefix` | IntelliJ's implicit package prefix for all code files. | `org.nohungrydogs` |
-| Name of subproject (following `lazy val`) | Your library's name, or the name of a particular module. | `dog-food-finder` |
-
-#### Multiple modules
-
-Each subproject listed in `build.sbt` is published as a separate artefact on Maven (albeit under the same versioning),
-which is useful if you want a modular design whereby downstream users need not include all facets of your library.
-Typically in this case you'll introduce one top-level subdirectory for each subproject.
-
-#### A note on sbt settings
-
-Settings are read from every `.sbt` file in the project root.
-It doesn't matter what they are called, other than that sbt simply concatenates their contents in alphabetical order of their names.
-A division between build information and publishing information is introduced for convenience.
-
-### 3. Set up your Maven Central account
-
-1. Create an account on [Maven Central](https://central.sonatype.com) to enable publishing, if you don't already have one.
-2. [Register](https://central.sonatype.com/publishing/namespaces) your namespace (e.g. `org.nohungrydogs`).
-   This should match the `organization` setting in `release.sbt`.
-3. [Generate](https://central.sonatype.com/usertoken) a user token.
-   This will give you a username and password, which you can add as repository secrets (see [step 5](#5-add-repository-secrets)).
-
-### 4. Generate a PGP key for signing releases
-
-Execute the following on your local machine to generate a [PGP](https://en.wikipedia.org/wiki/Pretty_Good_Privacy) key:
-
-```bash
-# Generate a new PGP key, making sure to remember your passphrase:
-gpg --gen-key
-
-# Expose the secret key in base64, using the public key provided by the above:
-gpg --armor --export-secret-keys <PUBLIC_KEY> | base64
-
-# Upload the public key to a keyserver:
-gpg --keyserver keyserver.ubuntu.com --send-keys <PUBLIC_KEY>
-```
-
-### 5. Add repository secrets
-
-Add the following secrets to your repository on GitHub, to allow publishing as part of an automated workflow:
-
-| Secret                    | Value                                                                                                               |
-|---------------------------|---------------------------------------------------------------------------------------------------------------------|
-| `SONATYPE_USERNAME`       | Username from Maven user token in [step 3](#3-set-up-your-maven-central-account).                                   |
-| `SONATYPE_PASSWORD`       | Password from Maven user token in [step 3](#3-set-up-your-maven-central-account).                                   |
-| `PGP_SECRET`              | Base64-encoded PGP private key from [step 4](#4-generate-a-pgp-key-for-signing-releases).                           |
-| `PGP_PASSPHRASE`          | Passphrase used when generating the PGP key in [step 4](#4-generate-a-pgp-key-for-signing-releases).                |
-| `GH_TOKEN`                | Your GitHub [PAT](https://github.com/settings/personal-access-tokens) with administrator to access your repository. |
-| `CLAUDE_CODE_OAUTH_TOKEN` | API key from [Claude](https://claude.com/product/claude-code) for agentic workflows (optional).                     |
-
-Secrets can be added from the GitHub web interface by nagivating as follows from your repository's page:
-
-> **Settings → Secrets and variables → Actions**
-
-### 6. Publish the Scaladoc documentation with Github Pages
-
-This project is configured to automatically extract and publish all [Scaladoc](https://docs.scala-lang.org/style/scaladoc.html) content
-as a stand-alone website using [GitHub Pages](https://pages.github.com/).
-
-All you need to do is configure GitHub to deploy the site from the branch named `gh-pages`,
-which will be automatically created following the first release.
-You can find this setting under:
-
-> **Settings → Pages**
-
-## 👮‍♂️ License
-
-The included MIT license should be considered only as part of the template, and is not binding.
-This repository is hereby released to the public domain, to be used freely.
-In particular, and contra [LICENSE.md](LICENSE.md), you may remove the license text from copies.
-
-## 🤝 Contributing
-
-[CONTRIBUTING.md](CONTRIBUTING.md) is also part of the template, and does not _necessarily_ apply to contributions to the template itself.
-The most important thing to know is that many of the configuration files are automatically synced from [Scala Config](https://github.com/SgtSwagrid/scala-config), and should be updated there rather than here.
-
-## 👁️ See also
-
-- Check out [Scala Website Template](https://github.com/SgtSwagrid/scala-website-template) for a similar template to quickly start a new full stack website in Scala.
-- This project is configured by [Scala Library Config](https://github.com/SgtSwagrid/scala-library-config).
-
-<br/><br/><br/><br/>
-<h3 align="center">⬆️ Delete • Keep ⬇️</h3>
-<br/><br/><br/><br/>
-
-<div align="center">
-
-  <h1>✨ My Library</h1>
-  <p>A very cool Scala library that does something great.</p>
-  
-  <!-- Update the following URLS to show live build status in your README. -->
   <span>
-    <a href="https://github.com/SgtSwagrid/scala-library-template/actions/workflows/build-integrity.yml"><img src="https://github.com/SgtSwagrid/scala-library-template/actions/workflows/build-integrity.yml/badge.svg" alt="Build status" /></a>
-    <a href="https://search.maven.org/artifact/com.alecdorrington/scala-library-template_3"><img src="https://img.shields.io/maven-central/v/com.alecdorrington/scala-library-template_3.svg" alt="Maven Central" /></a>
-    <a href="https://alecdorrington.com/scala-library-template"><img src="https://img.shields.io/badge/docs-latest-blue.svg" alt="Documentation" /></a>
+    <a href="https://github.com/SgtSwagrid/Iris/actions/workflows/build-integrity.yml"><img src="https://github.com/SgtSwagrid/Iris/actions/workflows/build-integrity.yml/badge.svg" alt="Build status" /></a>
+    <a href="https://search.maven.org/artifact/com.alecdorrington/iris_3"><img src="https://img.shields.io/maven-central/v/com.alecdorrington/iris_3.svg" alt="Maven Central" /></a>
+    <a href="https://alecdorrington.com/Iris"><img src="https://img.shields.io/badge/docs-latest-blue.svg" alt="Documentation" /></a>
   </span>
-  
+
 </div>
+
+> [!WARNING]
+> Iris is in beta. It is young, it has one user, and anything may change between minor versions.
+
+One small interface for sending prompts and conversations to a large language model,
+with adapters for [Anthropic](https://docs.anthropic.com/en/api/messages),
+[OpenAI](https://platform.openai.com/docs/api-reference/chat) and
+[Google Gemini](https://ai.google.dev/api/generate-content), so that switching provider is a matter of configuration.
+It is built on [Cats Effect](https://typelevel.org/cats-effect/), [sttp](https://sttp.softwaremill.com/) and [Circe](https://circe.github.io/circe/).
+
+Named for [Iris](https://en.wikipedia.org/wiki/Iris_(mythology)), messenger of the gods,
+who carried their words to mortals along the rainbow.
 
 ## ⬇️ Installation
 
-Add the following dependency to your `build.sbt`:
+Add the following to your `build.sbt`:
 
-<!-- Replace with the details for your own library. -->
 ```scala
-libraryDependencies += "com.alecdorrington" %% "scala-library-template" % "0.2.1"
+libraryDependencies += "com.alecdorrington" %% "iris" % "0.1.0"
 ```
+
+Compiled with Scala `3.8.4`, with no intention to explicitly support older versions. JVM only.
+
+## 🚀 Usage
+
+The public interface is [`LlmClient`](src/main/scala/LlmClient.scala).
+Build one for an explicit [`LlmConfig`](src/main/scala/LlmConfig.scala) with `LlmClient.resource`,
+over an sttp backend of your own with `LlmClient(config, backend)`,
+or from the environment (see [Configuration](#%EF%B8%8F-configuration)) with `LlmClient.fromEnv`.
+
+### Single-turn prompts
+
+```scala
+import com.alecdorrington.iris.{LlmClient, Prompt}
+
+LlmClient.fromEnv[IO].use {
+  case Some(client) => client.complete(Prompt("Hello!"))
+  case None         => // No provider configured.
+}
+```
+
+### Conversations
+
+Conversations are stateless: nothing is remembered between calls, and the full history
+travels with every request as a [`Chat`](src/main/scala/Chat.scala).
+To continue a conversation, append the model's reply and the next user message, then send the chat again:
+
+```scala
+import com.alecdorrington.iris.Chat
+
+val chat = Chat().withSystem("You are terse.").user("Name a colour.")
+for
+  first  <- client.send(chat)
+  second <- client.send(chat.assistant(first.text).user("And another."))
+yield second.text
+```
+
+### Tuning and metadata
+
+Each request accepts [`CompletionOptions`](src/main/scala/CompletionOptions.scala)
+(model override, token limit, temperature, top-p, stop sequences), and each
+[`Completion`](src/main/scala/Completion.scala) carries the reply text along with a
+normalised `StopReason` and token usage counts.
+
+```scala
+client.send(chat, CompletionOptions(temperature = Some(0.2), stopSequences = List("\n\n")))
+```
+
+### Errors
+
+A provider's refusal fails the effect with an [`LlmError`](src/main/scala/LlmError.scala):
+`Http` for an unsuccessful response, carrying its status and body, and `Malformed` for a response
+that could not be understood. Response bodies may contain provider detail you would rather not show
+to your own users, so consider logging them rather than passing them on.
+
+## ⚙️ Configuration
+
+`LlmConfig.fromEnv` (and so `LlmClient.fromEnv`) reads these environment variables:
+
+| Variable            | Meaning                                     | Default                        |
+|---------------------|---------------------------------------------|--------------------------------|
+| `LLM_PROVIDER`      | `anthropic`, `openai` or `gemini`           | Inferred from which key exists |
+| `ANTHROPIC_API_KEY` | API key for Anthropic                       | -                              |
+| `OPENAI_API_KEY`    | API key for OpenAI                          | -                              |
+| `GEMINI_API_KEY`    | API key for Gemini (or `GOOGLE_API_KEY`)    | -                              |
+| `LLM_MODEL`         | Model name to use                           | Provider-specific default      |
+| `LLM_MAX_TOKENS`    | Maximum number of tokens in each completion | `8192`                         |
+| `LLM_BASE_URL`      | Overrides the provider's API origin         | The provider's own origin      |
+
+With no key set, `fromEnv` yields `None`, and a set but unrecognised `LLM_PROVIDER` does too,
+rather than falling back to whichever key exists.
+
+## 🤝 Contributing
+
+Iris is developed as part of a larger private project, of which this repository is an automatically synchronised
+mirror (by [GitHub Graph](https://github.com/SgtSwagrid/github-graph)), so changes made here directly would be overwritten.
+Issues are very welcome; for anything more, please open an issue first.
 
 ## 👁️ See also
 
+- [Hecate](https://github.com/SgtSwagrid/Hecate), a sibling, for user accounts, sessions, groups and permissions.
+- [Eunomia](https://github.com/SgtSwagrid/Eunomia), a sibling, for filtering, ordering and paging lists.
 - This library was made using [Scala Library Template](https://github.com/SgtSwagrid/scala-library-template).
