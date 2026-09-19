@@ -11,7 +11,40 @@ Keep it concise and actionable.
 
 ## Project overview
 
-This is a Scala library that does ...
+This is Iris, a Scala 3 library giving one provider-agnostic interface to the APIs of large language models, with
+adapters for Anthropic, OpenAI and Google Gemini, built on Cats Effect, sttp and Circe. It is in beta.
+
+It is a single JVM module in `com.alecdorrington.iris`. `LlmClient` is the public interface (`send` a `Chat`,
+or `complete` a `Prompt`), with one adapter per `LlmProvider` (`AnthropicClient`, `OpenAiClient`, `GeminiClient`,
+sharing `JsonHttp`). `LlmConfig` holds provider, key, model, token limit and an optional base URL, and
+`LlmConfig.fromEnv` reads them from `LLM_*` and the providers' `*_API_KEY` variables.
+
+- Clients are stateless: no session identity reaches the provider, and a conversation's whole history travels with
+  each `Chat`. Keep it that way.
+- Every adapter must normalise what it returns: the reply text, a `StopReason` (unknown labels kept as `Other`) and
+  token usage in `Completion`. An unsuccessful response is `LlmError.Http` (status and body) and an unreadable one
+  `LlmError.Malformed`, so hosts can tell rate limits from broken responses; transport failures are sttp's own.
+- A set but unrecognised `LLM_PROVIDER` means unconfigured (`None`), never a fall back to key inference.
+- The library does no throttling, retrying or logging of its own; those are the host's to wrap around a client.
+- `LlmConfig.toString` redacts the API key, so hosts may log a configuration. Keep any new secret out of `toString`
+  and out of `LlmError` messages likewise.
+
+See [README.md](README.md) for usage.
+
+### Where this code lives
+
+This repository is a mirror. The library is developed inside a larger private project, beneath `iris/`, and every file
+here is copied from there by [GitHub Graph](https://github.com/SgtSwagrid/github-graph) whenever that project's `main`
+changes, overwriting whatever is here. So make changes there, never here. The shared configuration (workflows, Scalafmt, IDE settings, `project/plugins-*.sbt`) comes from further upstream still, in
+[Scala Library Config](https://github.com/SgtSwagrid/scala-library-config), which syncs into the private project's `iris/` first.
+`build.sbt`, `release.sbt`, `project/Dependencies.scala`, `README.md` and this file belong to the library.
+
+### Build
+
+- The root project `iris` is the library itself, published as `iris`. Its id is the library's name because the private
+  project includes this build by reference (`ProjectRef(file("iris"), "iris")`), alongside projects of its own.
+- The library must never depend on anything in the project that includes it.
+- Versions come from git tags (`sbt-ci-release`); publishing a GitHub release publishes to Maven Central.
 
 ## Instructions
 

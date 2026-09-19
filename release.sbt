@@ -1,13 +1,14 @@
-ThisBuild / description := "A reusable template for Scala libraries."
+ThisBuild / description :=
+  "A provider-agnostic Scala client for large language models."
 
-ThisBuild / homepage :=
-  Some(url("https://alecdorrington.com/scala-library-template"))
+ThisBuild / homepage := Some(url("https://github.com/SgtSwagrid/Iris"))
 
 ThisBuild / organization         := "com.alecdorrington"
 ThisBuild / organizationName     := "SgtSwagrid"
 ThisBuild / organizationHomepage := Some(url("https://github.com/SgtSwagrid"))
 
-ThisBuild / versionScheme := Some("strict")
+// Still in beta: anything may change between minor versions until 1.0.0.
+ThisBuild / versionScheme := Some("early-semver")
 
 ThisBuild / licenses :=
   List("MIT" -> url("https://opensource.org/licenses/MIT"))
