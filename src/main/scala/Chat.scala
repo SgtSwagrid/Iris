@@ -1,5 +1,7 @@
 package com.alecdorrington.iris
 
+import io.circe.Json
+
 /** The author of a [[Message]] in a [[Chat]]. */
 enum Role:
 
@@ -9,10 +11,71 @@ enum Role:
   /** The model itself. */
   case Assistant
 
-  /** The name a role is sent under, by every provider that shares it. */
+  /** The name a role is sent under, where a provider uses this one. */
   def wire: String = this match
     case User      => "user"
     case Assistant => "assistant"
+
+/**
+  * One part of a message. A message is a list of these, so that text and the
+  * media it refers to may travel together in the order they are meant to be
+  * read.
+  *
+  * A sealed trait rather than an `enum`, so that each case is a type of its
+  * own: [[Chat.results]] and [[Completion.toolCalls]] speak of one particular
+  * kind of part, which an enum's cases would widen away.
+  */
+sealed trait Part
+
+object Part:
+
+  /** Written text. */
+  final case class Text(text: String) extends Part
+
+  /**
+    * A picture, a document, or anything else a model may be given to look at.
+    *
+    * @param mediaType
+    *   The IANA media type of the data, e.g. `image/png`.
+    *
+    * @param data
+    *   The content itself, Base64 encoded.
+    */
+  final case class Media(mediaType: String, data: String) extends Part
+
+  /**
+    * The model asking for a tool to be run. Part of the model's own message,
+    * and sent back with the conversation so that the model can see what it
+    * asked for.
+    *
+    * @param id
+    *   What the provider calls this request, by which its result is matched to
+    *   it. Gemini names no such thing, so its tool's name stands in.
+    *
+    * @param name
+    *   The name of the [[Tool]] to run.
+    *
+    * @param arguments
+    *   The arguments to run it with, as described by [[Tool.parameters]].
+    */
+  final case class ToolRequest(id: String, name: String, arguments: Json)
+    extends Part
+
+  /**
+    * What running a tool produced, answering a [[ToolRequest]]. Part of the
+    * user's next message, since it is the host which speaks here.
+    *
+    * @param id
+    *   The [[ToolRequest.id]] this answers.
+    *
+    * @param name
+    *   The name of the tool which was run, which Gemini matches on.
+    *
+    * @param content
+    *   What the tool produced, for the model to read.
+    */
+  final case class ToolResult(id: String, name: String, content: String)
+    extends Part
 
 /**
   * A single message in a [[Chat]].
@@ -21,9 +84,28 @@ enum Role:
   *   The author of this message.
   *
   * @param content
-  *   The text of this message.
+  *   What this message is made of, in the order it is to be read.
   */
-final case class Message(role: Role, content: String)
+final case class Message(role: Role, content: List[Part]):
+
+  /** The written text of this message, with any media left out. */
+  def text: String = content
+    .collect:
+      case Part.Text(text) => text
+    .mkString
+
+  /** Whether this message is nothing but text. */
+  def isText: Boolean = content.forall(_.isInstanceOf[Part.Text])
+
+  /** The results this message carries, which some providers send apart. */
+  def toolResults: List[Part.ToolResult] = content.collect:
+    case result: Part.ToolResult => result
+
+object Message:
+
+  /** A message of text alone. */
+  def apply(role: Role, text: String): Message =
+    Message(role, List(Part.Text(text)))
 
 /**
   * The full history of a conversation with a model. Clients are stateless:
@@ -38,6 +120,14 @@ final case class Message(role: Role, content: String)
   *   second <- client.send(next)
   * yield second
   * }}}
+  *
+  * A chat is sent to be continued, so it should hold at least one message and
+  * end with the user's, as it does when built up through [[user]] and
+  * [[assistant]] in turn. A chat which ends with the assistant's own message
+  * asks the model to continue its own reply, which the newer Anthropic models
+  * refuse; an empty one asks nothing of anybody, which every provider refuses.
+  * Neither is rejected by the type, so both are reported as
+  * [[LlmError.Unsendable]] rather than spending a request to be told.
   *
   * @param messages
   *   Every message exchanged so far, oldest first.
@@ -56,6 +146,23 @@ final case class Chat
 
   /** This chat with a user message appended. */
   def user(content: String): Chat = add(Message(Role.User, content))
+
+  /** This chat with a user message of the given parts appended. */
+  def user(content: Part*): Chat = add(Message(Role.User, content.toList))
+
+  /** This chat with an assistant message of the given parts appended. */
+  def assistant(content: Part*): Chat =
+    add(Message(Role.Assistant, content.toList))
+
+  /** This chat with the model's reply, tool requests and all, appended. */
+  def reply(completion: Completion): Chat = add(Message(
+    Role.Assistant,
+    Part.Text(completion.text) +: completion.toolCalls,
+  ))
+
+  /** This chat with the results of the model's tool requests appended. */
+  def results(results: Part.ToolResult*): Chat =
+    add(Message(Role.User, results.toList))
 
   /** This chat with an assistant message appended. */
   def assistant(content: String): Chat = add(Message(Role.Assistant, content))

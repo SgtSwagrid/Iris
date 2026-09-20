@@ -1,16 +1,48 @@
 package com.alecdorrington.iris
 
+import scala.concurrent.duration.{DurationInt, FiniteDuration}
+
 /**
-  * The set of supported LLM providers.
+  * The set of supported LLM providers, and what each one is. Everything here is
+  * true of the provider rather than of one request to it, so an adapter need
+  * not carry its own copy.
+  *
+  * @param displayName
+  *   The provider's name as it is written, for display and in errors.
+  *
+  * @param origin
+  *   The origin of the provider's API, used unless one is configured.
   *
   * @param defaultModel
   *   The model used for this provider when none is configured explicitly.
   */
-enum LlmProvider(val defaultModel: String):
+enum LlmProvider
+  (
+    val displayName: String,
+    val origin: String,
+    val defaultModel: String,
+  ):
 
-  case Anthropic extends LlmProvider("claude-sonnet-5")
-  case OpenAi    extends LlmProvider("gpt-5")
-  case Gemini    extends LlmProvider("gemini-2.5-flash")
+  case Anthropic
+    extends LlmProvider(
+      "Anthropic",
+      "https://api.anthropic.com",
+      "claude-sonnet-5",
+    )
+
+  case OpenAi
+    extends LlmProvider(
+      "OpenAI",
+      "https://api.openai.com",
+      "gpt-5",
+    )
+
+  case Gemini
+    extends LlmProvider(
+      "Gemini",
+      "https://generativelanguage.googleapis.com",
+      "gemini-2.5-flash",
+    )
 
 object LlmProvider:
 
@@ -41,6 +73,10 @@ object LlmProvider:
   *   Overrides the provider's API origin (scheme and host, with no trailing
   *   `/`), e.g. to reach a proxy, a compatible third-party endpoint, or a stub
   *   in tests. The provider's own origin is used when unset.
+  *
+  * @param timeout
+  *   How long to wait for a completion before giving up. Generous by default,
+  *   because producing a long one can take a model several minutes.
   */
 final case class LlmConfig
   (
@@ -49,14 +85,21 @@ final case class LlmConfig
     model: String,
     maxTokens: Int,
     baseUrl: Option[String] = None,
+    timeout: FiniteDuration = LlmConfig.defaultTimeout,
   ):
 
-  /** The API origin to send to: [[baseUrl]] when set, else the given one. */
-  def origin(default: String): String = baseUrl.getOrElse(default)
+  /** What a request made with the given options is settled on. */
+  private[iris] def settings(options: CompletionOptions): Settings = Settings(
+    model = options.model.getOrElse(model),
+    maxTokens = options.maxTokens.getOrElse(maxTokens),
+  )
+
+  /** The API origin to send to: [[baseUrl]] when set, else the provider's. */
+  def origin: String = baseUrl.getOrElse(provider.origin)
 
   /** Describes this configuration without its [[apiKey]], so it is safe to log. */
   override def toString: String =
-    s"LlmConfig($provider, <redacted>, $model, $maxTokens, $baseUrl)"
+    s"LlmConfig($provider, <redacted>, $model, $maxTokens, $baseUrl, $timeout)"
 
 object LlmConfig:
 
@@ -66,12 +109,19 @@ object LlmConfig:
     .toList
     .flatMap(keyNames)
 
+  /** The completion token limit used when none is configured. */
+  val defaultMaxTokens: Int = 8192
+
+  /** How long to wait for a completion when no timeout is configured. */
+  val defaultTimeout: FiniteDuration = 5.minutes
+
   /** The optional configuration environment variables. */
-  val optionVariables: List[String] = List(
+  val settingVariables: List[String] = List(
     "LLM_PROVIDER",
     "LLM_MODEL",
     "LLM_MAX_TOKENS",
     "LLM_BASE_URL",
+    "LLM_TIMEOUT",
   )
 
   /**
@@ -83,23 +133,50 @@ object LlmConfig:
     *   - `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` (or
     *     `GOOGLE_API_KEY`): the provider API key.
     *   - `LLM_MODEL`: overrides the provider's default model.
-    *   - `LLM_MAX_TOKENS`: the completion token limit (default `8192`).
+    *   - `LLM_MAX_TOKENS`: the completion token limit (default
+    *     `defaultMaxTokens`). When present but not a positive whole number, no
+    *     configuration is produced.
     *   - `LLM_BASE_URL`: overrides the provider's API origin.
+    *   - `LLM_TIMEOUT`: how long to wait for a completion, in seconds (default
+    *     `defaultTimeout`). When present but not a positive whole number, no
+    *     configuration is produced.
     *
     * @return
-    *   A configuration, or `None` when no provider API key is set.
+    *   A configuration, or `None` when no provider API key is set, or when a
+    *   variable which is set cannot be used.
     */
   def fromEnv: Option[LlmConfig] =
     for
-      provider <- env("LLM_PROVIDER").fold(inferProvider)(LlmProvider.parse)
-      apiKey   <- apiKey(provider)
+      provider  <- env("LLM_PROVIDER").fold(inferProvider)(LlmProvider.parse)
+      apiKey    <- apiKey(provider)
+      maxTokens <-
+        env("LLM_MAX_TOKENS").fold(Some(defaultMaxTokens))(tokenLimit)
+      timeout <- env("LLM_TIMEOUT").fold(Some(defaultTimeout))(seconds)
     yield LlmConfig(
       provider = provider,
       apiKey = apiKey,
       model = env("LLM_MODEL").getOrElse(provider.defaultModel),
-      maxTokens = env("LLM_MAX_TOKENS").flatMap(_.toIntOption).getOrElse(8192),
+      maxTokens = maxTokens,
       baseUrl = env("LLM_BASE_URL"),
+      timeout = timeout,
     )
+
+  /**
+    * Reads a timeout in seconds, which must be a positive whole number, on the
+    * same terms as [[tokenLimit]]: a value which is not is no timeout at all.
+    */
+  private[iris] def seconds(value: String): Option[FiniteDuration] =
+    tokenLimit(value).map(_.seconds)
+
+  /**
+    * Reads a completion token limit, which must be a positive whole number. A
+    * value which is not is no limit at all, rather than a silent fall back to
+    * [[defaultMaxTokens]] which would hide the mistake.
+    */
+  private[iris] def tokenLimit(value: String): Option[Int] = value
+    .trim
+    .toIntOption
+    .filter(_ > 0)
 
   /** Infers the provider from whichever API key is present. */
   private def inferProvider: Option[LlmProvider] = LlmProvider

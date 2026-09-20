@@ -12,13 +12,20 @@ package com.alecdorrington.iris
   *
   * @param temperature
   *   The sampling temperature; higher values produce more varied replies.
+  *   Omitted for the Anthropic models which no longer accept sampling.
   *
   * @param topP
   *   The nucleus sampling threshold, restricting sampling to the smallest set
-  *   of tokens whose cumulative probability reaches this value.
+  *   of tokens whose cumulative probability reaches this value. Omitted for the
+  *   Anthropic models which no longer accept sampling.
   *
   * @param stopSequences
-  *   Sequences at which the model stops generating, if produced.
+  *   Sequences at which the model stops generating, if produced. Empty means
+  *   none, there being nothing an empty list could otherwise mean.
+  *
+  * @param tools
+  *   The tools the model may ask to have run. Empty means none, and is sent as
+  *   nothing at all rather than as an empty list.
   */
 final case class CompletionOptions
   (
@@ -27,4 +34,18 @@ final case class CompletionOptions
     temperature: Option[Double] = None,
     topP: Option[Double] = None,
     stopSequences: List[String] = List.empty,
+    tools: List[Tool] = List.empty,
   )
+
+/**
+  * What one request is actually made with, once the options given for it have
+  * fallen back on the configuration behind them. Resolved once per request, by
+  * [[LlmConfig.settings]], rather than at each of the places which ask.
+  *
+  * @param model
+  *   The model to prompt.
+  *
+  * @param maxTokens
+  *   The maximum number of tokens permitted in the completion.
+  */
+private[iris] final case class Settings(model: String, maxTokens: Int)

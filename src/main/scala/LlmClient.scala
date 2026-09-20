@@ -37,6 +37,34 @@ trait LlmClient[F[_]]:
     )
     : F[Completion]
 
+  /**
+    * Counts the tokens this chat would cost to send, as the provider counts
+    * them, so that a host may check a conversation against a budget or a
+    * context window before spending a completion on finding out.
+    *
+    * Not every provider offers this: OpenAI has no such endpoint, and fails
+    * with [[LlmError.Unsupported]] rather than guessing with a tokeniser of its
+    * own, which would be a different number confidently presented.
+    *
+    * @param chat
+    *   The conversation to count, including any system message.
+    *
+    * @param options
+    *   Optional per-request tuning; only the model is of any consequence.
+    *
+    * @return
+    *   An effect producing the number of input tokens.
+    */
+  def count
+    (
+      chat: Chat,
+      options: CompletionOptions = CompletionOptions(),
+    )
+    : F[Int]
+
+  /** Counts the tokens a single-turn prompt would cost to send. */
+  final def count(prompt: Prompt): F[Int] = count(prompt.toChat)
+
   /** Sends a single-turn prompt to the model and returns its completion. */
   final def complete
     (
