@@ -75,8 +75,86 @@ Each request accepts [`CompletionOptions`](src/main/scala/CompletionOptions.scal
 normalised `StopReason` and token usage counts.
 
 ```scala
-client.send(chat, CompletionOptions(temperature = Some(0.2), stopSequences = List("\n\n")))
+client.send(chat, CompletionOptions(maxTokens = Some(1024), stopSequences = List("\n\n")))
 ```
+
+> [!NOTE]
+> Anthropic's newer models, the default `claude-sonnet-5` among them, no longer accept sampling
+> parameters and reject a request which carries them. Iris omits `temperature` and top-p for those
+> models rather than let the request fail; both still apply to every other provider, and to
+> Anthropic's older models.
+
+### Pictures and documents
+
+A message is a list of [`Part`](src/main/scala/Chat.scala)s, so text may travel beside
+the media it refers to. A message of text alone is still sent as plain text, so nothing
+changes for a conversation which carries none.
+
+```scala
+import com.alecdorrington.iris.Part
+
+chat.user(Part.Text("What is in this picture?"), Part.Media("image/png", base64))
+```
+
+Anthropic and Gemini take both pictures and documents. OpenAI's chat completions take
+pictures only, and a document there fails with `LlmError.Unsupported` rather than being
+dropped or sent as something it is not.
+
+### Streaming
+
+Where a reader is waiting, [`LlmStream`](src/main/scala/LlmStream.scala) delivers the reply
+as it is written. It is a capability apart from `LlmClient`, because it needs a backend which
+can stream.
+
+```scala
+import com.alecdorrington.iris.{Delta, LlmStream}
+
+LlmStream.fromEnv[IO].use {
+  case Some(llm) => llm.stream(Prompt("Tell me a story.")).evalMap {
+    case Delta.Text(text)          => IO.print(text)
+    case Delta.End(reason, usage)  => IO.println(s"
+($reason)")
+  }.compile.drain
+  case None => IO.unit
+}
+```
+
+Nothing is sent until the stream is run, and a failure reaches it as an `LlmError` as it
+would anywhere else. `Delta.End` carries the token counts where the provider reports them
+as it ends; Anthropic counts the input at the start instead, so `send` remains the way to
+have both halves together.
+
+### Tools
+
+Offer the model tools it may ask to have run, and it will say so in `Completion.toolCalls`.
+Iris never runs a tool itself; what one does, and whether it is allowed to, is yours to decide.
+
+```scala
+import com.alecdorrington.iris.{Part, Tool}
+
+val weather = Tool("weather", "Looks up the weather.", schema)
+
+for
+  asked  <- client.send(chat, CompletionOptions(tools = List(weather)))
+  result  = Part.ToolResult(asked.toolCalls.head.id, "weather", lookUp(asked.toolCalls.head))
+  answer <- client.send(chat.reply(asked).results(result))
+yield answer.text
+```
+
+A reply which asked for a tool has `StopReason.ToolUse`, on every provider — Gemini reports
+no such reason of its own, so the asking is what says so.
+
+### Counting tokens
+
+`count` asks the provider what a chat would cost to send, so a conversation can be
+checked against a budget or a context window before a completion is spent finding out.
+
+```scala
+client.count(Prompt("How long is a piece of string?"))
+```
+
+OpenAI offers no such endpoint, and fails with `LlmError.Unsupported` rather than
+guessing with a tokeniser of its own.
 
 ### Errors
 
@@ -98,9 +176,12 @@ to your own users, so consider logging them rather than passing them on.
 | `LLM_MODEL`         | Model name to use                           | Provider-specific default      |
 | `LLM_MAX_TOKENS`    | Maximum number of tokens in each completion | `8192`                         |
 | `LLM_BASE_URL`      | Overrides the provider's API origin         | The provider's own origin      |
+| `LLM_TIMEOUT`       | Seconds to wait for a completion            | `300`                          |
 
-With no key set, `fromEnv` yields `None`, and a set but unrecognised `LLM_PROVIDER` does too,
-rather than falling back to whichever key exists.
+With no key set, `fromEnv` yields `None`. So does a variable which is set but cannot be used:
+an unrecognised `LLM_PROVIDER`, rather than falling back to whichever key exists, and an
+`LLM_MAX_TOKENS` which is not a positive whole number, rather than quietly reverting to the
+default and hiding the mistake.
 
 ## 🤝 Contributing
 

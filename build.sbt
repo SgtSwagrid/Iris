@@ -16,6 +16,10 @@ ThisBuild / scalacOptions ++= Seq(
   "-explain",
   "-explain-types",
   "-explain-cyclic",
+  "-deprecation",
+  "-feature",
+  "-unchecked",
+  "-Wunused:all",
 )
 
 /**

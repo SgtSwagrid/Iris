@@ -26,6 +26,10 @@ sharing `JsonHttp`). `LlmConfig` holds provider, key, model, token limit and an 
   `LlmError.Malformed`, so hosts can tell rate limits from broken responses; transport failures are sttp's own.
 - A set but unrecognised `LLM_PROVIDER` means unconfigured (`None`), never a fall back to key inference.
 - The library does no throttling, retrying or logging of its own; those are the host's to wrap around a client.
+  Nor does it run a tool it is asked for: `CompletionOptions.tools` offers them and `Completion.toolCalls`
+  reports what was asked, but what a tool does, and whether it may, is the host's.
+- `LlmStream` is a capability apart from `LlmClient`, since streaming needs a backend which can stream.
+  Its adapters extend `SseClient` as the others extend `JsonClient`, and reuse the same request bodies.
 - `LlmConfig.toString` redacts the API key, so hosts may log a configuration. Keep any new secret out of `toString`
   and out of `LlmError` messages likewise.
 
