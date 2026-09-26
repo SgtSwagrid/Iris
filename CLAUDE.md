@@ -28,6 +28,16 @@ sharing `JsonHttp`). `LlmConfig` holds provider, key, model, token limit and an 
 - The library does no throttling, retrying or logging of its own; those are the host's to wrap around a client.
   Nor does it run a tool it is asked for: `CompletionOptions.tools` offers them and `Completion.toolCalls`
   reports what was asked, but what a tool does, and whether it may, is the host's.
+- `CompletionOptions.tier` (`ModelTier`: `Fast`, `Standard`, `Thorough`) asks for a model by ability rather than name;
+  `LlmConfig.modelFor` resolves it: `model` for `Standard`, else `fastModel`/`thoroughModel` (`LLM_MODEL_FAST`,
+  `LLM_MODEL_THOROUGH`), else the provider's `LlmProvider.model(tier)`. A named `model` always outranks a tier.
+- A `Part.CacheBreakpoint` ends a prefix worth caching and says nothing to the model. Anthropic is told of one by
+  `cache_control` on the block before it (in its message, else the previous message's last, else the system message),
+  at most four per chat; OpenAI and Gemini cache prefixes unasked and are sent nothing, so their adapters drop them
+  (`Message.uncached`). `LlmClient.warm` sends `Chat.cacheable` with the least reply the provider allows (Anthropic
+  `max_tokens: 0`, others 1); a wrapper around a client must forward `warm`, not inherit the default. `Usage.inputTokens`
+  counts the whole prompt on every provider (Anthropic's `input_tokens` leaves the cache out, so its reads and writes are
+  added back) and `Usage.cachedTokens` the part read from the cache.
 - `LlmStream` is a capability apart from `LlmClient`, since streaming needs a backend which can stream.
   Its adapters extend `SseClient` as the others extend `JsonClient`, and reuse the same request bodies.
 - `LlmConfig.toString` redacts the API key, so hosts may log a configuration. Keep any new secret out of `toString`

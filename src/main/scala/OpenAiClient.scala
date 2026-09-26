@@ -151,7 +151,12 @@ private[iris] object OpenAiClient:
     * of its own, rather than as part of what the user said.
     */
   private def message(message: Message): List[Json] =
-    val spoken = message.content.filterNot(_.isInstanceOf[Part.ToolResult])
+    // OpenAI caches long prefixes of its own accord, so breakpoints say
+    // nothing to it.
+    val spoken = message
+      .uncached
+      .content
+      .filterNot(_.isInstanceOf[Part.ToolResult])
     message.toolResults.map(result) ++
       Option.when(spoken.nonEmpty)(said(message.role, spoken))
 
@@ -228,7 +233,7 @@ private[iris] object OpenAiClient:
         "type"      -> "image_url".asJson,
         "image_url" -> Json.obj("url" -> s"data:$mediaType;base64,$data".asJson),
       ))
-    case _: Part.ToolRequest | _: Part.ToolResult => None
+    case _: Part.ToolRequest | _: Part.ToolResult | Part.CacheBreakpoint => None
 
   /** Normalises an OpenAI finish reason. */
   private val stopReason: Option[String] => StopReason = StopReason.normalise(
@@ -254,11 +259,7 @@ private[iris] object OpenAiClient:
       ended.map(reason =>
         Delta.End(
           stopReason(Some(reason)),
-          event
-            .hcursor
-            .get[TokenCounts]("usage")
-            .toOption
-            .flatMap(c => Usage.of(c.promptTokens, c.completionTokens)),
+          event.hcursor.get[TokenCounts]("usage").toOption.flatMap(_.usage),
         ),
       ),
     )
@@ -304,19 +305,39 @@ private[iris] object OpenAiClient:
     given Decoder[Choice] =
       Decoder.forProduct2("message", "finish_reason")(Choice.apply)
 
-  /** The token counts of an OpenAI response. */
+  /** How many of an OpenAI prompt's tokens were read from its cache. */
+  final case class PromptDetails(cachedTokens: Option[Int])
+
+  object PromptDetails:
+
+    given Decoder[PromptDetails] =
+      Decoder.forProduct1("cached_tokens")(PromptDetails.apply)
+
+  /**
+    * The token counts of an OpenAI response, whose prompt tokens include those
+    * read from its cache.
+    */
   final case class TokenCounts
     (
       promptTokens: Option[Int],
       completionTokens: Option[Int],
+      promptDetails: Option[PromptDetails],
+    ):
+
+    /** These counts as usage. */
+    def usage: Option[Usage] = Usage.of(
+      promptTokens,
+      completionTokens,
+      promptDetails.flatMap(_.cachedTokens),
     )
 
   object TokenCounts:
 
-    given Decoder[TokenCounts] =
-      Decoder.forProduct2("prompt_tokens", "completion_tokens")(
-        TokenCounts.apply,
-      )
+    given Decoder[TokenCounts] = Decoder.forProduct3(
+      "prompt_tokens",
+      "completion_tokens",
+      "prompt_tokens_details",
+    )(TokenCounts.apply)
 
   /** The subset of an OpenAI response body that is of interest here. */
   final case class Response
@@ -340,8 +361,7 @@ private[iris] object OpenAiClient:
         Completion(
           text = choice.message.content.getOrElse(""),
           stopReason = stopReason(choice.finishReason),
-          usage =
-            usage.flatMap(c => Usage.of(c.promptTokens, c.completionTokens)),
+          usage = usage.flatMap(_.usage),
           toolCalls =
             choice.message.toolCalls.getOrElse(List.empty).map(_.toolRequest),
         )

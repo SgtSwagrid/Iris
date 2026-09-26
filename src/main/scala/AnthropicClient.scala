@@ -40,14 +40,28 @@ private[iris] final class AnthropicClient[F[_] : MonadThrow]
     (response: AnthropicClient.Response)
     : Either[LlmError, Completion] = response.completion
 
-  /** Anthropic refuses an empty chat, and one it would have to prefill. */
+  /**
+    * Anthropic refuses an empty chat, one it would have to prefill, and one
+    * with more breakpoints than it keeps.
+    */
   override protected def acceptable
     (chat: Chat, options: CompletionOptions)
     : Either[LlmError, Unit] =
     for
       _ <- JsonHttp.answerable(provider, chat)
       _ <- AnthropicClient.continuable(chat, model(options))
+      _ <- AnthropicClient.breakable(chat)
     yield ()
+
+  /**
+    * Anthropic writes a prefix without replying at all when allowed no tokens
+    * to reply with, which is what it offers for warming.
+    */
+  override def warm(chat: Chat, options: CompletionOptions): F[Completion] =
+    send(
+      chat.cacheable,
+      options.copy(maxTokens = Some(0)),
+    )
 
   override def count(chat: Chat, options: CompletionOptions): F[Int] =
     asking[AnthropicClient.TokenCount, Int](
@@ -98,13 +112,17 @@ private[iris] final class AnthropicStream[F[_] : Async]
   override protected def deltas(event: Json): List[Delta] = AnthropicClient
     .deltas(event)
 
-  /** Anthropic refuses an empty chat, and one it would have to prefill. */
+  /**
+    * Anthropic refuses an empty chat, one it would have to prefill, and one
+    * with more breakpoints than it keeps.
+    */
   override protected def acceptable
     (chat: Chat, options: CompletionOptions)
     : Either[LlmError, Unit] =
     for
       _ <- JsonHttp.answerable(provider, chat)
       _ <- AnthropicClient.continuable(chat, config.settings(options).model)
+      _ <- AnthropicClient.breakable(chat)
     yield ()
 
 private[iris] object AnthropicClient:
@@ -156,6 +174,24 @@ private[iris] object AnthropicClient:
       ),
     )
 
+  /** The most breakpoints Anthropic keeps in one request. */
+  val maxBreakpoints = 4
+
+  /** Refuses a chat with more breakpoints than Anthropic keeps. */
+  def breakable(chat: Chat): Either[LlmError, Unit] =
+    val breakpoints = chat
+      .messages
+      .flatMap(_.content)
+      .count(_ == Part.CacheBreakpoint)
+    Either.cond(
+      breakpoints <= maxBreakpoints,
+      (),
+      LlmError.Unsendable(
+        LlmProvider.Anthropic.displayName,
+        s"$breakpoints cache breakpoints were given, and at most $maxBreakpoints are kept",
+      ),
+    )
+
   /** The URL for counting the tokens of a message. */
   private def counting(config: LlmConfig): Either[LlmError, Uri] = JsonHttp
     .endpoint(
@@ -173,14 +209,16 @@ private[iris] object AnthropicClient:
       chat: Chat,
       options: CompletionOptions,
     )
-    : String = Json
-    .obj(
-      "model"    -> config.settings(options).model.asJson,
-      "system"   -> chat.system.asJson,
-      "messages" -> chat.messages.map(message).asJson,
-    )
-    .deepDropNullValues
-    .noSpaces
+    : String =
+    val (system, messages) = conversation(chat)
+    Json
+      .obj(
+        "model"    -> config.settings(options).model.asJson,
+        "system"   -> system,
+        "messages" -> messages,
+      )
+      .deepDropNullValues
+      .noSpaces
 
   /** The token count of an Anthropic counting response. */
   final case class TokenCount(inputTokens: Int)
@@ -199,8 +237,9 @@ private[iris] object AnthropicClient:
       streaming: Boolean = false,
     )
     : String =
-    val settings = config.settings(options)
-    val sampling = samples(settings.model)
+    val settings           = config.settings(options)
+    val sampling           = samples(settings.model)
+    val (system, messages) = conversation(chat)
     Json
       .obj(
         "model"          -> settings.model.asJson,
@@ -210,23 +249,96 @@ private[iris] object AnthropicClient:
         "stop_sequences" -> JsonHttp.stopSequences(options.stopSequences),
         "tools"          -> tools(options),
         "stream"         -> Option.when(streaming)(true).asJson,
-        "system"         -> chat.system.asJson,
-        "messages"       -> chat.messages.map(message).asJson,
+        "system"         -> system,
+        "messages"       -> messages,
       )
       .deepDropNullValues
       .noSpaces
 
   /**
-    * Serialises a single chat message. A message of text alone is sent as a
-    * bare string, which Anthropic takes as one block of text, so that carrying
-    * media costs nothing to those who do not.
+    * One part of a message as it is sent, and whether a breakpoint marks it as
+    * the last of a prefix to cache.
     */
-  private def message(message: Message): Json = Json.obj(
-    "role"    -> message.role.wire.asJson,
+  private type Marked = (Part, Boolean)
+
+  /**
+    * Whether a breakpoint marks the system message, and every message's blocks
+    * so far.
+    */
+  private type Placed = (Boolean, Vector[Vector[Marked]])
+
+  /**
+    * A chat's system message and messages, serialised with each breakpoint
+    * placed on the block just before it.
+    */
+  private def conversation(chat: Chat): (Json, Json) =
+    val (cached, blocks) = placed(chat)
+    (
+      chat.system.map(system(_, cached)).asJson,
+      chat
+        .messages
+        .zip(blocks)
+        .map((message, blocks) => this.message(message.role, blocks))
+        .asJson,
+    )
+
+  /** Every message's blocks, each breakpoint placed on the block before it. */
+  private def placed(chat: Chat): Placed = chat
+    .messages
+    .foldLeft((false, Vector.empty[Vector[Marked]])):
+      case ((cached, blocks), message) => message
+          .content
+          .foldLeft((cached, blocks :+ Vector.empty[Marked]))(place)
+
+  /**
+    * The blocks so far, with one more part of the last message placed. A
+    * breakpoint marks the block before it in its message, or failing that the
+    * last of an earlier message, or failing that the system message itself.
+    */
+  private def place(placed: Placed, part: Part): Placed =
+    val (cached, blocks) = placed
+    part match
+      case Part.CacheBreakpoint => blocks.lastIndexWhere(_.nonEmpty) match
+          case -1 => (true, blocks)
+          case at => (cached, blocks.updated(at, markLast(blocks(at))))
+      case _ => (cached, blocks.init :+ (blocks.last :+ (part -> false)))
+
+  /** The given blocks, the last of them marked. */
+  private def markLast(blocks: Vector[Marked]): Vector[Marked] = blocks.init :+
+    (blocks.last._1 -> true)
+
+  /** Serialises a system message, as a block when a breakpoint marks it. */
+  private def system(text: String, cached: Boolean): Json =
+    if cached then Json.arr(marked(Part.Text(text) -> true)) else text.asJson
+
+  /**
+    * Serialises a single chat message. A message of text alone, marking no
+    * prefix, is sent as a bare string, which Anthropic takes as one block of
+    * text, so that carrying media or caching costs nothing to those who do not.
+    */
+  private def message(role: Role, blocks: Vector[Marked]): Json = Json.obj(
+    "role"    -> role.wire.asJson,
     "content" ->
-      (if message.isText then message.text.asJson
-       else message.content.map(part).asJson),
+      (if blocks.forall((part, cached) =>
+           !cached && part.isInstanceOf[Part.Text],
+         )
+       then
+         blocks
+           .collect:
+             case (Part.Text(text), _) => text
+           .mkString
+           .asJson
+       else blocks.map(marked).asJson),
   )
+
+  /** Serialises one block, marked as the end of a prefix to cache if it is. */
+  private def marked(block: Marked): Json =
+    val (content, cached) = block
+    if cached then
+      part(content).deepMerge(Json.obj(
+        "cache_control" -> Json.obj("type" -> "ephemeral".asJson),
+      ))
+    else part(content)
 
   /** Serialises one part of a message. */
   private def part(part: Part): Json = part match
@@ -255,6 +367,9 @@ private[iris] object AnthropicClient:
         "tool_use_id" -> id.asJson,
         "content"     -> content.asJson,
       )
+    // A breakpoint is sent as a mark on the block before it, never as a block
+    // of its own, and so is taken out before any part is serialised.
+    case Part.CacheBreakpoint => Json.obj()
 
   /** Normalises an Anthropic stop reason. */
   private val stopReason: Option[String] => StopReason = StopReason.normalise(
@@ -325,17 +440,34 @@ private[iris] object AnthropicClient:
     given Decoder[Block] =
       Decoder.forProduct5("type", "text", "id", "name", "input")(Block.apply)
 
-  /** The token counts of an Anthropic response. */
+  /**
+    * The token counts of an Anthropic response. Anthropic counts as input only
+    * what it neither wrote to its cache nor read from it, and counts those two
+    * apart.
+    */
   final case class TokenCounts
     (
       inputTokens: Option[Int],
       outputTokens: Option[Int],
+      cacheWrites: Option[Int],
+      cacheReads: Option[Int],
+    ):
+
+    /** These counts as usage, every token of the prompt counted as input. */
+    def usage: Option[Usage] = Usage.of(
+      inputTokens.map(_ + cacheWrites.getOrElse(0) + cacheReads.getOrElse(0)),
+      outputTokens,
+      cacheReads,
     )
 
   object TokenCounts:
 
-    given Decoder[TokenCounts] =
-      Decoder.forProduct2("input_tokens", "output_tokens")(TokenCounts.apply)
+    given Decoder[TokenCounts] = Decoder.forProduct4(
+      "input_tokens",
+      "output_tokens",
+      "cache_creation_input_tokens",
+      "cache_read_input_tokens",
+    )(TokenCounts.apply)
 
   /** The subset of an Anthropic response body that is of interest here. */
   final case class Response
@@ -353,7 +485,7 @@ private[iris] object AnthropicClient:
     def completion: Either[LlmError, Completion] = Right(Completion(
       text = content.flatMap(_.reply).mkString,
       stopReason = AnthropicClient.stopReason(stopReason),
-      usage = usage.flatMap(c => Usage.of(c.inputTokens, c.outputTokens)),
+      usage = usage.flatMap(_.usage),
       toolCalls = content.flatMap(_.toolRequest),
     ))
 

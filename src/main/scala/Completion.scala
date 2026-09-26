@@ -77,18 +77,39 @@ object StopReason:
   *
   * @param outputTokens
   *   The number of tokens in the model's reply.
+  *
+  * @param cachedTokens
+  *   How many of the [[inputTokens]] were read from the provider's cache,
+  *   rather than processed afresh, as a prefix marked by a
+  *   [[Part.CacheBreakpoint]] can be.
   */
-final case class Usage(inputTokens: Int, outputTokens: Int)
+final case class Usage
+  (
+    inputTokens: Int,
+    outputTokens: Int,
+    cachedTokens: Int = 0,
+  )
 
 object Usage:
 
   /**
     * The usage a provider reported, where it reported both counts. Providers
     * omit them, individually or altogether, on a reply they did not give, so
-    * neither is required of them.
+    * neither is required of them. A provider which reports nothing of its cache
+    * read nothing from it.
     */
-  private[iris] def of(input: Option[Int], output: Option[Int]): Option[Usage] =
+  private[iris] def of
+    (
+      input: Option[Int],
+      output: Option[Int],
+      cached: Option[Int] = None,
+    )
+    : Option[Usage] =
     for
       inputTokens  <- input
       outputTokens <- output
-    yield Usage(inputTokens, outputTokens)
+    yield Usage(
+      inputTokens,
+      outputTokens,
+      cached.getOrElse(0),
+    )

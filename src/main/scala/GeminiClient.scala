@@ -157,10 +157,13 @@ private[iris] object GeminiClient:
     .deepDropNullValues
     .noSpaces
 
-  /** Serialises a single chat message. */
+  /**
+    * Serialises a single chat message. Gemini caches long prefixes of its own
+    * accord, so breakpoints say nothing to it.
+    */
   private def content(message: Message): Json = Json.obj(
     "role"  -> role(message.role).asJson,
-    "parts" -> message.content.map(part).asJson,
+    "parts" -> message.uncached.content.map(part).asJson,
   )
 
   /** Serialises a single text part. */
@@ -192,12 +195,7 @@ private[iris] object GeminiClient:
               .hcursor
               .get[TokenCounts]("usageMetadata")
               .toOption
-              .flatMap(c =>
-                Usage.of(
-                  c.promptTokenCount,
-                  c.candidatesTokenCount,
-                ),
-              ),
+              .flatMap(_.usage),
           ),
         ),
     )
@@ -237,6 +235,8 @@ private[iris] object GeminiClient:
           "response" -> Json.obj("result" -> content.asJson),
         ),
       )
+    // Breakpoints are taken out of a message before its parts are serialised.
+    case Part.CacheBreakpoint => Json.obj()
 
   /** The Gemini name for a message role. */
   private def role(role: Role): String = role match
@@ -299,13 +299,24 @@ private[iris] object GeminiClient:
   private def toolRequests(candidate: Candidate): List[Part.ToolRequest] =
     parts(candidate).flatMap(_.functionCall).map(_.toolRequest)
 
-  /** The token counts of a Gemini response. */
+  /**
+    * The token counts of a Gemini response, whose prompt tokens include those
+    * read from its cache.
+    */
   final case class TokenCounts
     (
       promptTokenCount: Option[Int],
       candidatesTokenCount: Option[Int],
+      cachedContentTokenCount: Option[Int],
     )
-    derives Decoder
+    derives Decoder:
+
+    /** These counts as usage. */
+    def usage: Option[Usage] = Usage.of(
+      promptTokenCount,
+      candidatesTokenCount,
+      cachedContentTokenCount,
+    )
 
   /** The subset of a Gemini response body that is of interest here. */
   final case class Response
@@ -335,12 +346,7 @@ private[iris] object GeminiClient:
           stopReason =
             if requested.nonEmpty then StopReason.ToolUse
             else stopReason(candidate.finishReason),
-          usage = usageMetadata.flatMap(c =>
-            Usage.of(
-              c.promptTokenCount,
-              c.candidatesTokenCount,
-            ),
-          ),
+          usage = usageMetadata.flatMap(_.usage),
           toolCalls = requested,
         )
 

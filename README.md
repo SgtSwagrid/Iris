@@ -70,12 +70,22 @@ yield second.text
 ### Tuning and metadata
 
 Each request accepts [`CompletionOptions`](src/main/scala/CompletionOptions.scala)
-(model override, token limit, temperature, top-p, stop sequences), and each
+(model override, model tier, token limit, temperature, top-p, stop sequences), and each
 [`Completion`](src/main/scala/Completion.scala) carries the reply text along with a
 normalised `StopReason` and token usage counts.
 
 ```scala
 client.send(chat, CompletionOptions(maxTokens = Some(1024), stopSequences = List("\n\n")))
+```
+
+Rather than name a model, a request may ask for a `ModelTier`: `Fast` for simple, mechanical work,
+`Standard` for the configured model, or `Thorough` for work needing judgement. Each tier prompts the
+model configured for it (`LLM_MODEL_FAST`, `LLM_MODEL`, `LLM_MODEL_THOROUGH`), else the provider's own
+choice: Anthropic's Haiku, Sonnet and Opus; OpenAI's `gpt-5-mini`, then `gpt-5` for both of the
+others; and Gemini's Flash-Lite, Flash and Pro.
+
+```scala
+client.send(chat, CompletionOptions(tier = Some(ModelTier.Fast)))
 ```
 
 > [!NOTE]
@@ -156,6 +166,31 @@ client.count(Prompt("How long is a piece of string?"))
 OpenAI offers no such endpoint, and fails with `LlmError.Unsupported` rather than
 guessing with a tokeniser of its own.
 
+### Caching
+
+When many requests begin alike, as when one document is asked several questions, put what
+they share first and end it with a `Part.CacheBreakpoint`, so that the provider can keep what it
+made of the prefix rather than read it afresh every time. `Usage.cachedTokens` says how much of a
+prompt was read from the cache.
+
+```scala
+val asking = (question: String) =>
+  Chat().withSystem("Answer from the document.")
+    .user(Part.Text(document), Part.CacheBreakpoint, Part.Text(question))
+
+for
+  _       <- client.warm(asking(""))
+  answers <- questions.parTraverse(question => client.send(asking(question)))
+yield answers
+```
+
+Requests sent at once cannot read what none of them has written yet, so `warm` writes the prefix
+first: everything up to the last breakpoint, asking for as little reply as the provider allows.
+
+Anthropic caches only what it is told to, and a breakpoint marks the block before it, at most four
+times in one chat. OpenAI and Gemini cache long prefixes of their own accord and are sent nothing.
+Each provider keeps a cache per model, and caches nothing shorter than its own minimum.
+
 ### Errors
 
 A provider's refusal fails the effect with an [`LlmError`](src/main/scala/LlmError.scala):
@@ -167,16 +202,18 @@ to your own users, so consider logging them rather than passing them on.
 
 `LlmConfig.fromEnv` (and so `LlmClient.fromEnv`) reads these environment variables:
 
-| Variable            | Meaning                                     | Default                        |
-|---------------------|---------------------------------------------|--------------------------------|
-| `LLM_PROVIDER`      | `anthropic`, `openai` or `gemini`           | Inferred from which key exists |
-| `ANTHROPIC_API_KEY` | API key for Anthropic                       | -                              |
-| `OPENAI_API_KEY`    | API key for OpenAI                          | -                              |
-| `GEMINI_API_KEY`    | API key for Gemini (or `GOOGLE_API_KEY`)    | -                              |
-| `LLM_MODEL`         | Model name to use                           | Provider-specific default      |
-| `LLM_MAX_TOKENS`    | Maximum number of tokens in each completion | `8192`                         |
-| `LLM_BASE_URL`      | Overrides the provider's API origin         | The provider's own origin      |
-| `LLM_TIMEOUT`       | Seconds to wait for a completion            | `300`                          |
+| Variable             | Meaning                                     | Default                        |
+|----------------------|---------------------------------------------|--------------------------------|
+| `LLM_PROVIDER`       | `anthropic`, `openai` or `gemini`           | Inferred from which key exists |
+| `ANTHROPIC_API_KEY`  | API key for Anthropic                       | -                              |
+| `OPENAI_API_KEY`     | API key for OpenAI                          | -                              |
+| `GEMINI_API_KEY`     | API key for Gemini (or `GOOGLE_API_KEY`)    | -                              |
+| `LLM_MODEL`          | Model name to use                           | Provider-specific default      |
+| `LLM_MODEL_FAST`     | Model for `ModelTier.Fast` requests         | Provider-specific default      |
+| `LLM_MODEL_THOROUGH` | Model for `ModelTier.Thorough` requests     | Provider-specific default      |
+| `LLM_MAX_TOKENS`     | Maximum number of tokens in each completion | `8192`                         |
+| `LLM_BASE_URL`       | Overrides the provider's API origin         | The provider's own origin      |
+| `LLM_TIMEOUT`        | Seconds to wait for a completion            | `300`                          |
 
 With no key set, `fromEnv` yields `None`. So does a variable which is set but cannot be used:
 an unrecognised `LLM_PROVIDER`, rather than falling back to whichever key exists, and an

@@ -15,12 +15,22 @@ import scala.concurrent.duration.{DurationInt, FiniteDuration}
   *
   * @param defaultModel
   *   The model used for this provider when none is configured explicitly.
+  *
+  * @param fastModel
+  *   The provider's model for [[ModelTier.Fast]] work, unless one is
+  *   configured.
+  *
+  * @param thoroughModel
+  *   The provider's model for [[ModelTier.Thorough]] work, unless one is
+  *   configured.
   */
 enum LlmProvider
   (
     val displayName: String,
     val origin: String,
     val defaultModel: String,
+    val fastModel: String,
+    val thoroughModel: String,
   ):
 
   case Anthropic
@@ -28,12 +38,18 @@ enum LlmProvider
       "Anthropic",
       "https://api.anthropic.com",
       "claude-sonnet-5",
+      "claude-haiku-4-5",
+      "claude-opus-5",
     )
 
+  // No abler model is assumed to answer chat completions, so OpenAI's thorough
+  // tier is its standard model unless one is configured.
   case OpenAi
     extends LlmProvider(
       "OpenAI",
       "https://api.openai.com",
+      "gpt-5",
+      "gpt-5-mini",
       "gpt-5",
     )
 
@@ -42,7 +58,15 @@ enum LlmProvider
       "Gemini",
       "https://generativelanguage.googleapis.com",
       "gemini-2.5-flash",
+      "gemini-2.5-flash-lite",
+      "gemini-2.5-pro",
     )
+
+  /** The model this provider uses for the given tier unless told otherwise. */
+  def model(tier: ModelTier): String = tier match
+    case ModelTier.Fast     => fastModel
+    case ModelTier.Standard => defaultModel
+    case ModelTier.Thorough => thoroughModel
 
 object LlmProvider:
 
@@ -77,6 +101,14 @@ object LlmProvider:
   * @param timeout
   *   How long to wait for a completion before giving up. Generous by default,
   *   because producing a long one can take a model several minutes.
+  *
+  * @param fastModel
+  *   The model to prompt for [[ModelTier.Fast]] work, when not the provider's
+  *   own choice for it.
+  *
+  * @param thoroughModel
+  *   The model to prompt for [[ModelTier.Thorough]] work, when not the
+  *   provider's own choice for it.
   */
 final case class LlmConfig
   (
@@ -86,20 +118,36 @@ final case class LlmConfig
     maxTokens: Int,
     baseUrl: Option[String] = None,
     timeout: FiniteDuration = LlmConfig.defaultTimeout,
+    fastModel: Option[String] = None,
+    thoroughModel: Option[String] = None,
   ):
 
-  /** What a request made with the given options is settled on. */
+  /**
+    * What a request made with the given options is settled on: the model it
+    * names, else the one configured for the tier it asks for, else [[model]].
+    */
   private[iris] def settings(options: CompletionOptions): Settings = Settings(
-    model = options.model.getOrElse(model),
+    model = options
+      .model
+      .getOrElse(modelFor(options.tier.getOrElse(ModelTier.Standard))),
     maxTokens = options.maxTokens.getOrElse(maxTokens),
   )
+
+  /**
+    * The model prompted for the given tier: [[model]] for the standard tier,
+    * and for the others the one configured, else the provider's own.
+    */
+  def modelFor(tier: ModelTier): String = tier match
+    case ModelTier.Fast     => fastModel.getOrElse(provider.model(tier))
+    case ModelTier.Standard => model
+    case ModelTier.Thorough => thoroughModel.getOrElse(provider.model(tier))
 
   /** The API origin to send to: [[baseUrl]] when set, else the provider's. */
   def origin: String = baseUrl.getOrElse(provider.origin)
 
   /** Describes this configuration without its [[apiKey]], so it is safe to log. */
   override def toString: String =
-    s"LlmConfig($provider, <redacted>, $model, $maxTokens, $baseUrl, $timeout)"
+    s"LlmConfig($provider, <redacted>, $model, $maxTokens, $baseUrl, $timeout, $fastModel, $thoroughModel)"
 
 object LlmConfig:
 
@@ -119,6 +167,8 @@ object LlmConfig:
   val settingVariables: List[String] = List(
     "LLM_PROVIDER",
     "LLM_MODEL",
+    "LLM_MODEL_FAST",
+    "LLM_MODEL_THOROUGH",
     "LLM_MAX_TOKENS",
     "LLM_BASE_URL",
     "LLM_TIMEOUT",
@@ -133,6 +183,8 @@ object LlmConfig:
     *   - `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` (or
     *     `GOOGLE_API_KEY`): the provider API key.
     *   - `LLM_MODEL`: overrides the provider's default model.
+    *   - `LLM_MODEL_FAST` / `LLM_MODEL_THOROUGH`: override the provider's model
+    *     for [[ModelTier.Fast]] and [[ModelTier.Thorough]] work.
     *   - `LLM_MAX_TOKENS`: the completion token limit (default
     *     `defaultMaxTokens`). When present but not a positive whole number, no
     *     configuration is produced.
@@ -159,6 +211,8 @@ object LlmConfig:
       maxTokens = maxTokens,
       baseUrl = env("LLM_BASE_URL"),
       timeout = timeout,
+      fastModel = env("LLM_MODEL_FAST"),
+      thoroughModel = env("LLM_MODEL_THOROUGH"),
     )
 
   /**
