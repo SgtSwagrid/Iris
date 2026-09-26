@@ -77,6 +77,22 @@ object Part:
   final case class ToolResult(id: String, name: String, content: String)
     extends Part
 
+  /**
+    * The end of a prefix worth caching: everything before this point, the
+    * system message included, is sent alike by many requests, so the provider
+    * may keep what it made of it rather than read it afresh each time. It says
+    * nothing to the model itself.
+    *
+    * Anthropic caches only what it is told to, and is told by this: the block
+    * just before it is marked, at most four times in one chat. OpenAI and
+    * Gemini cache every long prefix of their own accord, and are sent nothing.
+    * A prefix too short for the provider to cache is simply not cached.
+    *
+    * Requests sent at once cannot read what none of them has yet written, so
+    * [[LlmClient.warm]] writes the prefix before a batch of them is sent.
+    */
+  case object CacheBreakpoint extends Part
+
 /**
   * A single message in a [[Chat]].
   *
@@ -94,8 +110,15 @@ final case class Message(role: Role, content: List[Part]):
       case Part.Text(text) => text
     .mkString
 
-  /** Whether this message is nothing but text. */
+  /**
+    * Whether this message is nothing but text, with no breakpoint in it either,
+    * which some providers must be sent apart from the text.
+    */
   def isText: Boolean = content.forall(_.isInstanceOf[Part.Text])
+
+  /** This message with any cache breakpoints left out. */
+  def uncached: Message =
+    copy(content = content.filterNot(_ == Part.CacheBreakpoint))
 
   /** The results this message carries, which some providers send apart. */
   def toolResults: List[Part.ToolResult] = content.collect:
@@ -169,3 +192,22 @@ final case class Chat
 
   /** This chat with the given system message. */
   def withSystem(instructions: String): Chat = copy(system = Some(instructions))
+
+  /**
+    * The part of this chat worth caching: everything up to its last
+    * [[Part.CacheBreakpoint]], which is kept, so that the prefix is sent just
+    * as the whole chat sends it. Nothing but the system message when no message
+    * holds a breakpoint, which is no chat to send.
+    */
+  def cacheable: Chat =
+    val last = messages.lastIndexWhere(_.content.contains(Part.CacheBreakpoint))
+    copy(messages =
+      if last < 0 then List.empty
+      else
+        val message = messages(last)
+        messages.take(last) :+ message.copy(content =
+          message
+            .content
+            .take(message.content.lastIndexOf(Part.CacheBreakpoint) + 1),
+        ),
+    )

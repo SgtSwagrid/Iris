@@ -26,6 +26,10 @@ package com.alecdorrington.iris
   * @param tools
   *   The tools the model may ask to have run. Empty means none, and is sent as
   *   nothing at all rather than as an empty list.
+  *
+  * @param tier
+  *   How able a model is wanted, when no [[model]] is named: the model
+  *   configured for that tier is prompted (see [[LlmConfig.modelFor]]).
   */
 final case class CompletionOptions
   (
@@ -35,6 +39,7 @@ final case class CompletionOptions
     topP: Option[Double] = None,
     stopSequences: List[String] = List.empty,
     tools: List[Tool] = List.empty,
+    tier: Option[ModelTier] = None,
   )
 
 /**

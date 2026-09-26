@@ -73,6 +73,33 @@ trait LlmClient[F[_]]:
     )
     : F[Completion] = send(prompt.toChat, options)
 
+  /**
+    * Writes the [[Chat.cacheable]] prefix of a chat into the provider's cache,
+    * asking for as little reply as the provider allows, so that requests
+    * sharing that prefix which are then sent at once all read it. Sent at once
+    * unwarmed, none of them could read what the others were still writing, and
+    * each would pay to write its own.
+    *
+    * Worth it only before several requests: one request writes the prefix just
+    * as well by itself. The prefix must hold at least one message, and a chat
+    * with no [[Part.CacheBreakpoint]] has none to warm, so it is refused as
+    * [[LlmError.Unsendable]]. The model, tools and every other option must be
+    * those the requests will be sent with, since a cache is kept per model.
+    *
+    * @return
+    *   An effect producing the provider's empty reply, whose usage says how
+    *   much of the prefix was cached.
+    */
+  def warm
+    (
+      chat: Chat,
+      options: CompletionOptions = CompletionOptions(),
+    )
+    : F[Completion] = send(
+    chat.cacheable,
+    options.copy(maxTokens = Some(1)),
+  )
+
 object LlmClient:
 
   /** Creates a client for the given configuration over an existing backend. */
