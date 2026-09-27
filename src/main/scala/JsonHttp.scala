@@ -2,7 +2,7 @@ package com.alecdorrington.iris
 
 import cats.MonadThrow
 import cats.syntax.all.*
-import io.circe.{Decoder, Json}
+import io.circe.{Decoder, Encoder, Json}
 import io.circe.parser.decode
 import io.circe.syntax.*
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
@@ -79,23 +79,62 @@ private[iris] object JsonHttp:
     basicRequest.post(endpoint).body(body).contentType("application/json")
 
   /**
-    * Refuses a chat with nothing in it to answer, which every provider rejects,
-    * before a request is spent discovering as much.
+    * Refuses a chat with nothing in it to answer, or with a message saying
+    * nothing, both of which every provider rejects, before a request is spent
+    * discovering as much.
     */
   def answerable(provider: LlmProvider, chat: Chat): Either[LlmError, Unit] =
-    Either.cond(
-      chat.messages.nonEmpty,
-      (),
-      LlmError.Unsendable(
-        provider.displayName,
-        "it has no messages",
-      ),
-    )
+    for
+      _ <- Either.cond(
+        chat.messages.nonEmpty,
+        (),
+        LlmError.Unsendable(
+          provider.displayName,
+          "it has no messages",
+        ),
+      )
+      _ <- Either.cond(
+        !chat.messages.exists(_.saysNothing),
+        (),
+        LlmError.Unsendable(
+          provider.displayName,
+          "one of its messages says nothing",
+        ),
+      )
+    yield ()
 
-  /** Serialises stop sequences for a request body, omitted when empty. */
-  def stopSequences(sequences: List[String]): Json = Option
-    .when(sequences.nonEmpty)(sequences)
+  /**
+    * A JSON object of the given fields, leaving out any which is null, which is
+    * how whatever a request does not set is omitted. Only the fields themselves
+    * are: a null within one, as in a tool's schema or the arguments a model
+    * gave one, is part of its value, and is sent as it is.
+    */
+  def obj(fields: (String, Json)*): Json = Json.obj(fields*).dropNullValues
+
+  /** Serialises the given fields as a request body, as [[obj]] does. */
+  def requestBody(fields: (String, Json)*): String = obj(fields*).noSpaces
+
+  /** Serialises a list for a request body, omitted when empty. */
+  def unlessEmpty[A : Encoder](items: List[A]): Json = Option
+    .when(items.nonEmpty)(items)
     .asJson
+
+  /**
+    * The failure of an unsuccessful response, carrying its body and how long
+    * the provider asked us to wait, where it said.
+    */
+  def unsuccessful
+    (
+      provider: LlmProvider,
+      response: Response[?],
+      detail: String,
+    )
+    : LlmError = LlmError.Http(
+    provider.displayName,
+    response.code,
+    retryAfter(response.header("Retry-After")),
+    detail,
+  )
 
   /**
     * How long a provider asked us to wait, where it said so in seconds. The
@@ -114,12 +153,7 @@ private[iris] object JsonHttp:
     )
     : Either[LlmError, R] = response
     .body
-    .leftMap(LlmError.Http(
-      provider.displayName,
-      response.code,
-      retryAfter(response.header("Retry-After")),
-      _,
-    ))
+    .leftMap(unsuccessful(provider, response, _))
     .flatMap: body =>
       decode[R](body).leftMap: error =>
         LlmError.Malformed(provider.displayName, error.getMessage)

@@ -2,11 +2,12 @@ package com.alecdorrington.iris
 
 import cats.MonadThrow
 import cats.effect.Async
+import fs2.Stream
 import io.circe.{Decoder, Json}
 import io.circe.syntax.*
 import sttp.capabilities.fs2.Fs2Streams
 import sttp.client4.*
-import sttp.model.Uri
+import sttp.model.{Header, Uri}
 
 /**
   * An [[LlmClient]] adapter for the [Anthropic Messages
@@ -20,38 +21,23 @@ private[iris] final class AnthropicClient[F[_] : MonadThrow]
 
   override protected def endpoint
     (options: CompletionOptions)
-    : Either[LlmError, Uri] = JsonHttp.endpoint(
-    provider,
-    config.origin,
-    "v1",
-    "messages",
-  )
+    : Either[LlmError, Uri] = AnthropicClient.endpoint(config)
 
   override protected def body(chat: Chat, options: CompletionOptions): String =
     AnthropicClient.requestJson(config, chat, options)
 
   override protected def authenticated
     (request: Request[Either[String, String]])
-    : Request[Either[String, String]] = request
-    .header("x-api-key", config.apiKey)
-    .header("anthropic-version", "2023-06-01")
+    : Request[Either[String, String]] =
+    request.headers(AnthropicClient.credentials(config)*)
 
   override protected def completion
     (response: AnthropicClient.Response)
     : Either[LlmError, Completion] = response.completion
 
-  /**
-    * Anthropic refuses an empty chat, one it would have to prefill, and one
-    * with more breakpoints than it keeps.
-    */
   override protected def acceptable
     (chat: Chat, options: CompletionOptions)
-    : Either[LlmError, Unit] =
-    for
-      _ <- JsonHttp.answerable(provider, chat)
-      _ <- AnthropicClient.continuable(chat, model(options))
-      _ <- AnthropicClient.breakable(chat)
-    yield ()
+    : Either[LlmError, Unit] = AnthropicClient.acceptable(config, chat, options)
 
   /**
     * Anthropic writes a prefix without replying at all when allowed no tokens
@@ -65,19 +51,11 @@ private[iris] final class AnthropicClient[F[_] : MonadThrow]
 
   override def count(chat: Chat, options: CompletionOptions): F[Int] =
     asking[AnthropicClient.TokenCount, Int](
-      for
-        _        <- JsonHttp.answerable(provider, chat)
-        endpoint <- AnthropicClient.counting(config)
-      yield authenticated(JsonHttp.post(
-        endpoint,
-        AnthropicClient.countJson(config, chat, options),
-      )),
+      JsonHttp
+        .answerable(provider, chat)
+        .flatMap(_ => AnthropicClient.counting(config)),
+      AnthropicClient.countJson(config, chat, options),
     )(count => Right(count.inputTokens))
-
-  /** The model this request is for. */
-  private def model(options: CompletionOptions): String = config
-    .settings(options)
-    .model
 
 /**
   * An [[LlmStream]] adapter for the [Anthropic Messages
@@ -94,38 +72,56 @@ private[iris] final class AnthropicStream[F[_] : Async]
 
   override protected def endpoint
     (options: CompletionOptions)
-    : Either[LlmError, Uri] = JsonHttp.endpoint(
-    provider,
-    config.origin,
-    "v1",
-    "messages",
-  )
+    : Either[LlmError, Uri] = AnthropicClient.endpoint(config)
 
   override protected def body(chat: Chat, options: CompletionOptions): String =
     AnthropicClient.requestJson(config, chat, options, true)
 
   override protected def authenticated(request: SseRequest[F]): SseRequest[F] =
-    request
-      .header("x-api-key", config.apiKey)
-      .header("anthropic-version", "2023-06-01")
+    request.headers(AnthropicClient.credentials(config)*)
 
-  override protected def deltas(event: Json): List[Delta] = AnthropicClient
-    .deltas(event)
+  override protected def reply(events: Stream[F, Json]): Stream[F, Delta] = Sse
+    .each(AnthropicClient.deltas)(events)
 
-  /**
-    * Anthropic refuses an empty chat, one it would have to prefill, and one
-    * with more breakpoints than it keeps.
-    */
   override protected def acceptable
     (chat: Chat, options: CompletionOptions)
-    : Either[LlmError, Unit] =
-    for
-      _ <- JsonHttp.answerable(provider, chat)
-      _ <- AnthropicClient.continuable(chat, config.settings(options).model)
-      _ <- AnthropicClient.breakable(chat)
-    yield ()
+    : Either[LlmError, Unit] = AnthropicClient.acceptable(config, chat, options)
 
 private[iris] object AnthropicClient:
+
+  /** The URL for sending a message. */
+  def endpoint(config: LlmConfig): Either[LlmError, Uri] = JsonHttp.endpoint(
+    LlmProvider.Anthropic,
+    config.origin,
+    "v1",
+    "messages",
+  )
+
+  /**
+    * The headers which authenticate a request, and name the version of the API
+    * it is written for.
+    */
+  def credentials(config: LlmConfig): Seq[Header] = Seq(
+    Header("x-api-key", config.apiKey),
+    Header("anthropic-version", "2023-06-01"),
+  )
+
+  /**
+    * Anthropic refuses an empty chat, one the model it is for would have to
+    * prefill, and one marking more blocks for caching than it keeps.
+    */
+  def acceptable
+    (
+      config: LlmConfig,
+      chat: Chat,
+      options: CompletionOptions,
+    )
+    : Either[LlmError, Unit] =
+    for
+      _ <- JsonHttp.answerable(LlmProvider.Anthropic, chat)
+      _ <- continuable(chat, config.settings(options).model)
+      _ <- breakable(chat)
+    yield ()
 
   /**
     * The models which no longer accept sampling parameters. Anthropic removed
@@ -174,23 +170,30 @@ private[iris] object AnthropicClient:
       ),
     )
 
-  /** The most breakpoints Anthropic keeps in one request. */
+  /** The most blocks Anthropic keeps marked for caching in one request. */
   val maxBreakpoints = 4
 
-  /** Refuses a chat with more breakpoints than Anthropic keeps. */
+  /** Refuses a chat marking more blocks for caching than Anthropic keeps. */
   def breakable(chat: Chat): Either[LlmError, Unit] =
-    val breakpoints = chat
-      .messages
-      .flatMap(_.content)
-      .count(_ == Part.CacheBreakpoint)
+    val count = marks(chat)
     Either.cond(
-      breakpoints <= maxBreakpoints,
+      count <= maxBreakpoints,
       (),
       LlmError.Unsendable(
         LlmProvider.Anthropic.displayName,
-        s"$breakpoints cache breakpoints were given, and at most $maxBreakpoints are kept",
+        s"its cache breakpoints mark $count blocks, and at most $maxBreakpoints are kept",
       ),
     )
+
+  /**
+    * How many blocks a chat's breakpoints mark, as it is sent: breakpoints in a
+    * row mark the one block before them, and one with nothing before it marks
+    * nothing at all.
+    */
+  private def marks(chat: Chat): Int =
+    val (cached, blocks) = placed(chat)
+    val onSystem         = if cached && chat.system.nonEmpty then 1 else 0
+    onSystem + blocks.flatten.count(_._2)
 
   /** The URL for counting the tokens of a message. */
   private def counting(config: LlmConfig): Either[LlmError, Uri] = JsonHttp
@@ -211,14 +214,11 @@ private[iris] object AnthropicClient:
     )
     : String =
     val (system, messages) = conversation(chat)
-    Json
-      .obj(
-        "model"    -> config.settings(options).model.asJson,
-        "system"   -> system,
-        "messages" -> messages,
-      )
-      .deepDropNullValues
-      .noSpaces
+    JsonHttp.requestBody(
+      "model"    -> config.settings(options).model.asJson,
+      "system"   -> system,
+      "messages" -> messages,
+    )
 
   /** The token count of an Anthropic counting response. */
   final case class TokenCount(inputTokens: Int)
@@ -240,20 +240,17 @@ private[iris] object AnthropicClient:
     val settings           = config.settings(options)
     val sampling           = samples(settings.model)
     val (system, messages) = conversation(chat)
-    Json
-      .obj(
-        "model"          -> settings.model.asJson,
-        "max_tokens"     -> settings.maxTokens.asJson,
-        "temperature"    -> options.temperature.filter(_ => sampling).asJson,
-        "top_p"          -> options.topP.filter(_ => sampling).asJson,
-        "stop_sequences" -> JsonHttp.stopSequences(options.stopSequences),
-        "tools"          -> tools(options),
-        "stream"         -> Option.when(streaming)(true).asJson,
-        "system"         -> system,
-        "messages"       -> messages,
-      )
-      .deepDropNullValues
-      .noSpaces
+    JsonHttp.requestBody(
+      "model"          -> settings.model.asJson,
+      "max_tokens"     -> settings.maxTokens.asJson,
+      "temperature"    -> options.temperature.filter(_ => sampling).asJson,
+      "top_p"          -> options.topP.filter(_ => sampling).asJson,
+      "stop_sequences" -> JsonHttp.unlessEmpty(options.stopSequences),
+      "tools"          -> JsonHttp.unlessEmpty(options.tools.map(tool)),
+      "stream"         -> Option.when(streaming)(true).asJson,
+      "system"         -> system,
+      "messages"       -> messages,
+    )
 
   /**
     * One part of a message as it is sent, and whether a breakpoint marks it as
@@ -385,11 +382,6 @@ private[iris] object AnthropicClient:
     "description"  -> tool.description.asJson,
     "input_schema" -> tool.parameters,
   )
-
-  /** Serialises the tools on offer, omitted when there are none. */
-  private def tools(options: CompletionOptions): Json = Option
-    .when(options.tools.nonEmpty)(options.tools.map(tool))
-    .asJson
 
   /**
     * What one streamed event says. Text arrives as a delta to a content block;

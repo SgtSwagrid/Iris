@@ -2,6 +2,7 @@ package com.alecdorrington.iris
 
 import cats.MonadThrow
 import cats.effect.Async
+import fs2.Stream
 import io.circe.{Decoder, Json}
 import io.circe.syntax.*
 import sttp.capabilities.fs2.Fs2Streams
@@ -37,11 +38,12 @@ private[iris] final class GeminiClient[F[_] : MonadThrow]
 
   override def count(chat: Chat, options: CompletionOptions): F[Int] =
     asking[GeminiClient.TokenCount, Int](
-      for
-        _        <- JsonHttp.answerable(provider, chat)
-        endpoint <-
-          GeminiClient.counting(config, config.settings(options).model)
-      yield authenticated(JsonHttp.post(endpoint, GeminiClient.countJson(chat))),
+      JsonHttp
+        .answerable(provider, chat)
+        .flatMap(_ =>
+          GeminiClient.counting(config, config.settings(options).model),
+        ),
+      GeminiClient.countJson(chat),
     )(count => Right(count.totalTokens))
 
 /**
@@ -68,64 +70,55 @@ private[iris] final class GeminiStream[F[_] : Async]
   override protected def authenticated(request: SseRequest[F]): SseRequest[F] =
     request.header("x-goog-api-key", config.apiKey)
 
-  override protected def deltas(event: Json): List[Delta] =
-    GeminiClient.deltas(event)
+  override protected def reply(events: Stream[F, Json]): Stream[F, Delta] =
+    GeminiClient.reply(events)
 
 private[iris] object GeminiClient:
 
   /**
-    * The URL for generating content with the given model. The model names a
+    * The URL for calling the given method of the given model. The model names a
     * path segment, so it is encoded rather than interpolated, lest a name
     * bearing a `/` or a `?` address something else entirely.
     */
-  def endpoint(config: LlmConfig, model: String): Either[LlmError, Uri] =
-    JsonHttp.endpoint(
-      LlmProvider.Gemini,
-      config.origin,
-      "v1beta",
-      "models",
-      s"$model:generateContent",
+  private def calling
+    (
+      config: LlmConfig,
+      model: String,
+      method: String,
     )
-
-  /** The URL for streaming a reply from the given model. */
-  def streaming(config: LlmConfig, model: String): Either[LlmError, Uri] =
-    JsonHttp
-      .endpoint(
-        LlmProvider.Gemini,
-        config.origin,
-        "v1beta",
-        "models",
-        s"$model:streamGenerateContent",
-      )
-      .map(_.addParam("alt", "sse"))
-
-  /** The URL for counting the tokens of a request to the given model. */
-  private def counting
-    (config: LlmConfig, model: String)
     : Either[LlmError, Uri] = JsonHttp.endpoint(
     LlmProvider.Gemini,
     config.origin,
     "v1beta",
     "models",
-    s"$model:countTokens",
+    s"$model:$method",
   )
 
-  /** Serialises a chat into a request to count it. */
-  def countJson(chat: Chat): String = Json
-    .obj(
-      "contents" ->
-        (chat.system.map(systemContent).toList ++ chat.messages.map(content))
-          .asJson,
+  /** The URL for generating content with the given model. */
+  def endpoint(config: LlmConfig, model: String): Either[LlmError, Uri] =
+    calling(config, model, "generateContent")
+
+  /** The URL for streaming a reply from the given model. */
+  def streaming(config: LlmConfig, model: String): Either[LlmError, Uri] =
+    calling(config, model, "streamGenerateContent").map(
+      _.addParam("alt", "sse"),
     )
-    .noSpaces
+
+  /** The URL for counting the tokens of a request to the given model. */
+  private def counting
+    (config: LlmConfig, model: String)
+    : Either[LlmError, Uri] = calling(config, model, "countTokens")
 
   /**
-    * A system message as a counted content. Counting takes no
-    * `system_instruction` of its own, so it is counted as a message would be.
+    * Serialises a chat into a request to count it, its contents as a request to
+    * answer it sends them. Counting takes no `system_instruction` of its own,
+    * so a system message is counted as the user's would be.
     */
-  private def systemContent(text: String): Json = Json.obj(
-    "role"  -> "user".asJson,
-    "parts" -> Json.arr(part(text)),
+  def countJson(chat: Chat): String = JsonHttp.requestBody(
+    "contents" ->
+      (chat.system.map(Message(Role.User, _)).toList ++ chat.messages)
+        .map(content)
+        .asJson,
   )
 
   /** The token count of a Gemini counting response. */
@@ -138,24 +131,18 @@ private[iris] object GeminiClient:
       chat: Chat,
       options: CompletionOptions,
     )
-    : String = Json
-    .obj(
-      "system_instruction" ->
-        chat
-          .system
-          .map(text => Json.obj("parts" -> Json.arr(part(text))))
-          .asJson,
-      "tools"            -> tools(options),
-      "contents"         -> chat.messages.map(content).asJson,
-      "generationConfig" -> Json.obj(
-        "maxOutputTokens" -> config.settings(options).maxTokens.asJson,
-        "temperature"     -> options.temperature.asJson,
-        "topP"            -> options.topP.asJson,
-        "stopSequences"   -> JsonHttp.stopSequences(options.stopSequences),
-      ),
-    )
-    .deepDropNullValues
-    .noSpaces
+    : String = JsonHttp.requestBody(
+    "system_instruction" ->
+      chat.system.map(text => Json.obj("parts" -> Json.arr(part(text)))).asJson,
+    "tools"            -> tools(options),
+    "contents"         -> chat.messages.map(content).asJson,
+    "generationConfig" -> JsonHttp.obj(
+      "maxOutputTokens" -> config.settings(options).maxTokens.asJson,
+      "temperature"     -> options.temperature.asJson,
+      "topP"            -> options.topP.asJson,
+      "stopSequences"   -> JsonHttp.unlessEmpty(options.stopSequences),
+    ),
+  )
 
   /**
     * Serialises a single chat message. Gemini caches long prefixes of its own
@@ -170,27 +157,46 @@ private[iris] object GeminiClient:
   private def part(text: String): Json = Json.obj("text" -> text.asJson)
 
   /**
-    * What one streamed event says. Gemini sends the same shape it sends whole,
-    * a piece at a time, so a single event may both say something and be the
-    * last to do so.
+    * The reply which a stream's events make up. Gemini sends the same shape it
+    * sends whole, a piece at a time, so a single event may both say something
+    * and be the last to do so, and a reply which asked for a tool in any event
+    * stopped for it, as a whole reply which asked for one does.
     */
-  def deltas(event: Json): List[Delta] =
-    val candidate = event.hcursor.downField("candidates").downN(0)
-    val said      = candidate
-      .downField("content")
-      .get[List[ReplyPart]]("parts")
-      .toOption
-      .getOrElse(List.empty)
-      .flatMap(_.text)
-      .mkString
+  def reply[F[_]](events: Stream[F, Json]): Stream[F, Delta] = events
+    .zipWithScan1(false)(_ || asks(_))
+    .flatMap((event, asked) => Stream.emits(deltas(event, asked)))
+
+  /** Whether one streamed event asks for a tool. */
+  private def asks(event: Json): Boolean =
+    streamed(event).exists(_.functionCall.nonEmpty)
+
+  /** The parts of the reply which one streamed event carries. */
+  private def streamed(event: Json): List[ReplyPart] = event
+    .hcursor
+    .downField("candidates")
+    .downN(0)
+    .downField("content")
+    .get[List[ReplyPart]]("parts")
+    .toOption
+    .getOrElse(List.empty)
+
+  /**
+    * What one streamed event says, given whether the reply has asked for a tool
+    * by the end of it.
+    */
+  private def deltas(event: Json, asked: Boolean): List[Delta] =
+    val said = streamed(event).flatMap(_.text).mkString
     List.concat(
       Option.when(said.nonEmpty)(Delta.Text(said)),
-      candidate
+      event
+        .hcursor
+        .downField("candidates")
+        .downN(0)
         .get[String]("finishReason")
         .toOption
         .map(reason =>
           Delta.End(
-            stopReason(Some(reason)),
+            stopped(asked, Some(reason)),
             event
               .hcursor
               .get[TokenCounts]("usageMetadata")
@@ -248,6 +254,13 @@ private[iris] object GeminiClient:
     StopReason.normalise("STOP", "MAX_TOKENS")
 
   /**
+    * Why a reply stopped, given whether it asked for a tool. Gemini reports no
+    * distinct finish reason for having asked, so the asking is what says so.
+    */
+  private def stopped(asked: Boolean, reason: Option[String]): StopReason =
+    if asked then StopReason.ToolUse else stopReason(reason)
+
+  /**
     * A tool a Gemini reply asks for. Gemini names no identifier for one, so the
     * tool's own name stands in where a [[Part.ToolRequest.id]] is wanted.
     */
@@ -292,10 +305,7 @@ private[iris] object GeminiClient:
     .flatMap(_.text)
     .mkString
 
-  /**
-    * The tools a candidate asks for. Gemini reports no distinct finish reason
-    * for having asked, so their presence is what says so.
-    */
+  /** The tools a candidate asks for. */
   private def toolRequests(candidate: Candidate): List[Part.ToolRequest] =
     parts(candidate).flatMap(_.functionCall).map(_.toolRequest)
 
@@ -333,8 +343,7 @@ private[iris] object GeminiClient:
       * `200` and no reply, so it would otherwise pass for an empty one.
       */
     def completion: Either[LlmError, Completion] = candidates
-      .getOrElse(List.empty)
-      .headOption
+      .flatMap(_.headOption)
       .toRight(LlmError.Malformed(
         LlmProvider.Gemini.displayName,
         unanswered,
@@ -343,9 +352,10 @@ private[iris] object GeminiClient:
         val requested = toolRequests(candidate)
         Completion(
           text = text(candidate),
-          stopReason =
-            if requested.nonEmpty then StopReason.ToolUse
-            else stopReason(candidate.finishReason),
+          stopReason = stopped(
+            requested.nonEmpty,
+            candidate.finishReason,
+          ),
           usage = usageMetadata.flatMap(_.usage),
           toolCalls = requested,
         )

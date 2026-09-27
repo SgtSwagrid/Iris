@@ -33,3 +33,13 @@ private[iris] object Sse:
     .map(parse)
     .collect:
       case Right(json) => json
+
+  /**
+    * The reply which the given events make up, where each says what it says
+    * alone, as the given function reads it: into a list, because a provider may
+    * end a reply in the same breath as finishing it.
+    */
+  def each[F[_]]
+    (read: Json => List[Delta])
+    (events: Stream[F, Json])
+    : Stream[F, Delta] = events.map(read).flatMap(Stream.emits)
