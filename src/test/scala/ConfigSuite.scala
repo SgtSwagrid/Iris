@@ -65,42 +65,16 @@ class ConfigSuite extends FunSuite:
     assertEquals(LlmProvider.parse("claude"), None)
     assertEquals(LlmProvider.parse(""), None)
 
-  test("a tier prompts the model configured for it, else the provider's"):
-    val config = LlmConfig(
-      LlmProvider.Anthropic,
-      "key",
-      "model-x",
-      512,
-      fastModel = Some("model-fast"),
-    )
-    def model(options: CompletionOptions) = config.settings(options).model
-    assertEquals(model(CompletionOptions()), "model-x")
-    assertEquals(
-      model(CompletionOptions(tier = Some(ModelTier.Standard))),
-      "model-x",
-    )
-    assertEquals(
-      model(CompletionOptions(tier = Some(ModelTier.Fast))),
-      "model-fast",
-    )
-    assertEquals(
-      model(CompletionOptions(tier = Some(ModelTier.Thorough))),
-      LlmProvider.Anthropic.thoroughModel,
-    )
-
-  test("a model named outright outranks the tier asked for"):
+  test("a model named for a request outranks the configured one"):
     val config = LlmConfig(
       LlmProvider.Gemini,
       "key",
       "model-x",
       512,
     )
+    def model(options: CompletionOptions) = config.settings(options).model
+    assertEquals(model(CompletionOptions()), "model-x")
     assertEquals(
-      config
-        .settings(CompletionOptions(
-          model = Some("model-y"),
-          tier = Some(ModelTier.Fast),
-        ))
-        .model,
+      model(CompletionOptions(model = Some("model-y"))),
       "model-y",
     )

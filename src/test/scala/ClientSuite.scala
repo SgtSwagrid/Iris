@@ -2,6 +2,7 @@ package com.alecdorrington.iris
 
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
+import com.alecdorrington.iris.Fixtures.config
 import munit.FunSuite
 import scala.concurrent.duration.DurationInt
 import sttp.client4.impl.cats.CatsMonadAsyncError
@@ -14,12 +15,8 @@ import sttp.model.{Header, StatusCode}
   */
 class ClientSuite extends FunSuite:
 
-  private val config = LlmConfig(
-    LlmProvider.Anthropic,
-    "key",
-    "model-x",
-    512,
-  )
+  /** As [[config]], but for Gemini. */
+  private val gemini = config.copy(provider = LlmProvider.Gemini)
 
   private val prompt = Prompt("Hello")
 
@@ -41,6 +38,12 @@ class ClientSuite extends FunSuite:
   /** What the given client makes of its one stubbed response. */
   private def result(client: LlmClient[IO]): Either[Throwable, Completion] =
     client.complete(prompt).attempt.unsafeRunSync()
+
+  /** What the given client makes of counting the prompt. */
+  private def counted(client: LlmClient[IO]): Either[Throwable, Int] = client
+    .count(prompt)
+    .attempt
+    .unsafeRunSync()
 
   test("a successful response becomes a completion"):
     val body = """{"content":[{"type":"text","text":"Hi"}],
@@ -115,34 +118,29 @@ class ClientSuite extends FunSuite:
     )
 
   test("anthropic counts a chat before it is sent"):
-    val counted = client("""{"input_tokens":42}""")
-      .count(prompt)
-      .attempt
-      .unsafeRunSync()
-    assertEquals(counted, Right(42))
+    assertEquals(
+      counted(client("""{"input_tokens":42}""")),
+      Right(42),
+    )
 
   test("gemini counts a chat before it is sent"):
-    val gemini  = config.copy(provider = LlmProvider.Gemini)
-    val counted = client(
-      """{"totalTokens":17}""",
-      config = gemini,
-    ).count(prompt).attempt.unsafeRunSync()
-    assertEquals(counted, Right(17))
+    assertEquals(
+      counted(client(
+        """{"totalTokens":17}""",
+        config = gemini,
+      )),
+      Right(17),
+    )
 
   test("openai says it cannot count rather than guessing"):
-    val openAi  = config.copy(provider = LlmProvider.OpenAi)
-    val counted = client("{}", config = openAi)
-      .count(prompt)
-      .attempt
-      .unsafeRunSync()
+    val openAi = config.copy(provider = LlmProvider.OpenAi)
     assertEquals(
-      counted,
+      counted(client("{}", config = openAi)),
       Left(LlmError.Unsupported("OpenAI", "counting tokens")),
     )
 
   test("each provider is given its own adapter"):
-    val gemini = config.copy(provider = LlmProvider.Gemini)
-    val body   = """{"candidates":[{"content":{"parts":[{"text":"Hei"}]},
+    val body = """{"candidates":[{"content":{"parts":[{"text":"Hei"}]},
          "finishReason":"STOP"}]}"""
     assertEquals(
       result(client(body, config = gemini)).map(_.text),

@@ -1,18 +1,12 @@
 package com.alecdorrington.iris
 
+import com.alecdorrington.iris.Fixtures.{config, json}
 import io.circe.Json
-import io.circe.parser.{decode, parse}
+import io.circe.parser.decode
 import munit.FunSuite
 
 /** Tests of offering a tool, being asked for one, and answering. */
 class ToolSuite extends FunSuite:
-
-  private val config = LlmConfig(
-    LlmProvider.Anthropic,
-    "key",
-    "model-x",
-    512,
-  )
 
   private val weather = Tool(
     "weather",
@@ -39,8 +33,6 @@ class ToolSuite extends FunSuite:
     .user("What is the weather in Zug?")
     .assistant(asked)
     .results(answered)
-
-  private def json(body: String): Json = parse(body).toOption.get
 
   test("anthropic offers a tool by its schema"):
     val body =
@@ -211,6 +203,128 @@ class ToolSuite extends FunSuite:
     assertEquals(
       completion.map(_.stopReason),
       Right(StopReason.ToolUse),
+    )
+
+  /** A tool whose schema holds nulls, which are values in their own right. */
+  private val nullable = Tool(
+    "weather",
+    "Looks up the weather somewhere, or where it can.",
+    Json.obj(
+      "type"       -> Json.fromString("object"),
+      "properties" -> Json.obj(
+        "city" -> Json.obj(
+          "type" -> Json.arr(
+            Json.fromString("string"),
+            Json.fromString("null"),
+          ),
+          "default" -> Json.Null,
+          "enum"    -> Json.arr(Json.fromString("Zug"), Json.Null),
+        ),
+      ),
+    ),
+  )
+
+  /** A request for that tool, whose arguments hold a null of their own. */
+  private val unplaced = asked.copy(arguments = Json.obj("city" -> Json.Null))
+
+  /** A chat in which that tool was asked for and answered. */
+  private val unplacedExchange = Chat()
+    .user("What is the weather?")
+    .assistant(unplaced)
+    .results(answered)
+
+  private val offeringNullable = CompletionOptions(tools = List(nullable))
+
+  test("anthropic sends the nulls in a schema and in arguments as they are"):
+    val body = json(AnthropicClient.requestJson(
+      config,
+      unplacedExchange,
+      offeringNullable,
+    ))
+    assertEquals(
+      body.hcursor.downField("tools").downN(0).downField("input_schema").focus,
+      Some(nullable.parameters),
+    )
+    assertEquals(
+      body
+        .hcursor
+        .downField("messages")
+        .downN(1)
+        .downField("content")
+        .downN(0)
+        .downField("input")
+        .focus,
+      Some(unplaced.arguments),
+    )
+
+  test("openai sends the nulls in a schema and in arguments as they are"):
+    val body = json(OpenAiClient.requestJson(
+      config,
+      unplacedExchange,
+      offeringNullable,
+    ))
+    val call = body.hcursor.downField("messages").downN(1)
+    assertEquals(
+      body
+        .hcursor
+        .downField("tools")
+        .downN(0)
+        .downField("function")
+        .downField("parameters")
+        .focus,
+      Some(nullable.parameters),
+    )
+    assertEquals(
+      call
+        .downField("tool_calls")
+        .downN(0)
+        .downField("function")
+        .get[String]("arguments")
+        .toOption,
+      Some("""{"city":null}"""),
+    )
+    assert(call.downField("content").failed)
+
+  test("gemini sends the nulls in a schema and in arguments as they are"):
+    val body = json(GeminiClient.requestJson(
+      config,
+      unplacedExchange,
+      offeringNullable,
+    ))
+    assertEquals(
+      body
+        .hcursor
+        .downField("tools")
+        .downN(0)
+        .downField("functionDeclarations")
+        .downN(0)
+        .downField("parameters")
+        .focus,
+      Some(nullable.parameters),
+    )
+    assertEquals(
+      body
+        .hcursor
+        .downField("contents")
+        .downN(1)
+        .downField("parts")
+        .downN(0)
+        .downField("functionCall")
+        .downField("args")
+        .focus,
+      Some(unplaced.arguments),
+    )
+
+  test("gemini counts the contents it would send"):
+    val counted = json(GeminiClient.countJson(unplacedExchange))
+    val sent    = json(GeminiClient.requestJson(
+      config,
+      unplacedExchange,
+      offeringNullable,
+    ))
+    assertEquals(
+      counted.hcursor.downField("contents").focus,
+      sent.hcursor.downField("contents").focus,
     )
 
   test("a model's reply can be appended and answered"):

@@ -16,8 +16,8 @@ private[iris] type SseRequest[F[_]] = StreamRequest[
 
 /**
   * What every streaming adapter does alike: refuse a chat the provider would
-  * not answer, ask for the reply as a stream of events, and read each event for
-  * whatever it says about the reply so far.
+  * not answer, ask for the reply as a stream of events, and read the events for
+  * whatever they say about the reply so far.
   *
   * A subclass supplies only what its provider does differently.
   */
@@ -41,10 +41,10 @@ private[iris] abstract class SseClient[F[_] : Async]
   protected def authenticated(request: SseRequest[F]): SseRequest[F]
 
   /**
-    * What one event says about the reply, where it says anything. A list,
-    * because a provider may end a reply in the same breath as finishing it.
+    * The reply which a stream's events make up, read as they arrive. A provider
+    * each of whose events says what it says alone reads them with [[Sse.each]].
     */
-  protected def deltas(event: Json): List[Delta]
+  protected def reply(events: Stream[F, Json]): Stream[F, Delta]
 
   /** Why this provider would refuse the chat, where it would. */
   protected def acceptable
@@ -61,8 +61,7 @@ private[iris] abstract class SseClient[F[_] : Async]
     .eval(Async[F].fromEither(request(chat, options)))
     .flatMap(sent)
     .through(Sse.events)
-    .map(deltas)
-    .flatMap(Stream.emits)
+    .through(reply)
 
   /** The request which asks for the next reply, or why it cannot be made. */
   private def request
@@ -72,10 +71,8 @@ private[iris] abstract class SseClient[F[_] : Async]
       _   <- acceptable(chat, options)
       url <- endpoint(options)
     yield authenticated(
-      basicRequest
-        .post(url)
-        .body(body(chat, options))
-        .contentType("application/json")
+      JsonHttp
+        .post(url, body(chat, options))
         .readTimeout(config.timeout)
         .response(asStreamUnsafe(Fs2Streams[F])),
     )
@@ -88,11 +85,8 @@ private[iris] abstract class SseClient[F[_] : Async]
         .body
         .fold(
           error =>
-            Stream.raiseError[F](LlmError.Http(
-              provider.displayName,
-              response.code,
-              JsonHttp.retryAfter(response.header("Retry-After")),
-              error,
-            )),
+            Stream.raiseError[F](
+              JsonHttp.unsuccessful(provider, response, error),
+            ),
           identity,
         )

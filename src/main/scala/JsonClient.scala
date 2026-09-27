@@ -44,19 +44,21 @@ private[iris] abstract class JsonClient[F[_] : MonadThrow, R : Decoder]
     ))
 
   /**
-    * Sends a request of this provider's, reading an `A` out of a `B`. Used by
-    * an adapter which asks its provider for something other than a reply.
+    * Posts the given JSON to the given endpoint under this provider's
+    * credentials, and reads an `A` out of the `B` it answers with. The endpoint
+    * may instead say why no request can be made, which then fails the effect.
+    * Used as well by an adapter which asks its provider for something other
+    * than a reply.
     */
   protected def asking[B : Decoder, A]
     (
-      request: Either[
-        LlmError,
-        Request[Either[String, String]],
-      ],
+      url: Either[LlmError, Uri],
+      json: => String,
     )
     (extract: B => Either[LlmError, A])
-    : F[A] =
-    JsonHttp.send[F, B, A](backend, provider, config.timeout)(request)(extract)
+    : F[A] = JsonHttp.send[F, B, A](backend, provider, config.timeout)(url.map(
+    uri => authenticated(JsonHttp.post(uri, json)),
+  ))(extract)
 
   /**
     * Why this provider would refuse the chat, where it would. Every provider
@@ -71,16 +73,7 @@ private[iris] abstract class JsonClient[F[_] : MonadThrow, R : Decoder]
     : Either[LlmError, Unit] = JsonHttp.answerable(provider, chat)
 
   override def send(chat: Chat, options: CompletionOptions): F[Completion] =
-    asking[R, Completion](request(chat, options))(completion)
-
-  /** The request which asks for the next reply, or why it cannot be made. */
-  private def request
-    (chat: Chat, options: CompletionOptions)
-    : Either[
-      LlmError,
-      Request[Either[String, String]],
-    ] =
-    for
-      _   <- acceptable(chat, options)
-      url <- endpoint(options)
-    yield authenticated(JsonHttp.post(url, body(chat, options)))
+    asking[R, Completion](
+      acceptable(chat, options).flatMap(_ => endpoint(options)),
+      body(chat, options),
+    )(completion)

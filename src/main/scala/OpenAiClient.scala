@@ -2,6 +2,7 @@ package com.alecdorrington.iris
 
 import cats.MonadThrow
 import cats.effect.Async
+import fs2.Stream
 import io.circe.{Decoder, Json}
 import io.circe.parser.parse
 import io.circe.syntax.*
@@ -21,13 +22,7 @@ private[iris] final class OpenAiClient[F[_] : MonadThrow]
 
   override protected def endpoint
     (options: CompletionOptions)
-    : Either[LlmError, Uri] = JsonHttp.endpoint(
-    provider,
-    config.origin,
-    "v1",
-    "chat",
-    "completions",
-  )
+    : Either[LlmError, Uri] = OpenAiClient.endpoint(config)
 
   override protected def body(chat: Chat, options: CompletionOptions): String =
     OpenAiClient.requestJson(config, chat, options)
@@ -40,14 +35,9 @@ private[iris] final class OpenAiClient[F[_] : MonadThrow]
     (response: OpenAiClient.Response)
     : Either[LlmError, Completion] = response.completion
 
-  /** Chat completions take pictures, but no other media. */
   override protected def acceptable
     (chat: Chat, options: CompletionOptions)
-    : Either[LlmError, Unit] =
-    for
-      _ <- JsonHttp.answerable(provider, chat)
-      _ <- OpenAiClient.pictorial(chat)
-    yield ()
+    : Either[LlmError, Unit] = OpenAiClient.acceptable(chat)
 
 /**
   * An [[LlmStream]] adapter for the [OpenAI Chat Completions
@@ -64,13 +54,7 @@ private[iris] final class OpenAiStream[F[_] : Async]
 
   override protected def endpoint
     (options: CompletionOptions)
-    : Either[LlmError, Uri] = JsonHttp.endpoint(
-    provider,
-    config.origin,
-    "v1",
-    "chat",
-    "completions",
-  )
+    : Either[LlmError, Uri] = OpenAiClient.endpoint(config)
 
   override protected def body(chat: Chat, options: CompletionOptions): String =
     OpenAiClient.requestJson(config, chat, options, true)
@@ -78,19 +62,28 @@ private[iris] final class OpenAiStream[F[_] : Async]
   override protected def authenticated(request: SseRequest[F]): SseRequest[F] =
     request.auth.bearer(config.apiKey)
 
-  override protected def deltas(event: Json): List[Delta] =
-    OpenAiClient.deltas(event)
+  override protected def reply(events: Stream[F, Json]): Stream[F, Delta] = Sse
+    .each(OpenAiClient.deltas)(events)
 
-  /** Chat completions take pictures, but no other media. */
   override protected def acceptable
     (chat: Chat, options: CompletionOptions)
-    : Either[LlmError, Unit] =
-    for
-      _ <- JsonHttp.answerable(provider, chat)
-      _ <- OpenAiClient.pictorial(chat)
-    yield ()
+    : Either[LlmError, Unit] = OpenAiClient.acceptable(chat)
 
 private[iris] object OpenAiClient:
+
+  /** The URL for completing a chat. */
+  def endpoint(config: LlmConfig): Either[LlmError, Uri] = JsonHttp.endpoint(
+    LlmProvider.OpenAi,
+    config.origin,
+    "v1",
+    "chat",
+    "completions",
+  )
+
+  /** Refuses an empty chat, and one carrying media other than pictures. */
+  def acceptable(chat: Chat): Either[LlmError, Unit] = JsonHttp
+    .answerable(LlmProvider.OpenAi, chat)
+    .flatMap(_ => pictorial(chat))
 
   /** Serialises a chat into an OpenAI request body. */
   def requestJson
@@ -104,24 +97,19 @@ private[iris] object OpenAiClient:
     val settings = config.settings(options)
     val messages = chat.system.map(text("system", _)).toList ++
       chat.messages.flatMap(message)
-    Json
-      .obj(
-        "model"                 -> settings.model.asJson,
-        "max_completion_tokens" -> settings.maxTokens.asJson,
-        "temperature"           -> options.temperature.asJson,
-        "top_p"                 -> options.topP.asJson,
-        "stop"   -> JsonHttp.stopSequences(options.stopSequences),
-        "tools"  -> tools(options),
-        "stream" -> Option.when(streaming)(true).asJson,
-        // Usage is withheld from a stream unless it is asked for:
-        "stream_options" ->
-          Option
-            .when(streaming)(Json.obj("include_usage" -> true.asJson))
-            .asJson,
-        "messages" -> messages.asJson,
-      )
-      .deepDropNullValues
-      .noSpaces
+    JsonHttp.requestBody(
+      "model"                 -> settings.model.asJson,
+      "max_completion_tokens" -> settings.maxTokens.asJson,
+      "temperature"           -> options.temperature.asJson,
+      "top_p"                 -> options.topP.asJson,
+      "stop"                  -> JsonHttp.unlessEmpty(options.stopSequences),
+      "tools"                 -> JsonHttp.unlessEmpty(options.tools.map(tool)),
+      "stream"                -> Option.when(streaming)(true).asJson,
+      // Usage is withheld from a stream unless it is asked for:
+      "stream_options" ->
+        Option.when(streaming)(Json.obj("include_usage" -> true.asJson)).asJson,
+      "messages" -> messages.asJson,
+    )
 
   /**
     * The media which chat completions accept, which is pictures alone. A
@@ -167,11 +155,14 @@ private[iris] object OpenAiClient:
     "content"      -> result.content.asJson,
   )
 
-  /** Serialises what an author said, along with any tool they asked for. */
+  /**
+    * Serialises what an author said, along with any tool they asked for, and
+    * without content where they asked for tools alone.
+    */
   private def said(role: Role, spoken: List[Part]): Json =
     val calls = spoken.collect:
       case request: Part.ToolRequest => request
-    Json.obj(
+    JsonHttp.obj(
       "role"    -> role.wire.asJson,
       "content" -> content(spoken.filterNot(_.isInstanceOf[Part.ToolRequest])),
       "tool_calls" -> Option.when(calls.nonEmpty)(calls.map(call)).asJson,
@@ -213,11 +204,6 @@ private[iris] object OpenAiClient:
       "parameters"  -> tool.parameters,
     ),
   )
-
-  /** Serialises the tools on offer, omitted when there are none. */
-  private def tools(options: CompletionOptions): Json = Option
-    .when(options.tools.nonEmpty)(options.tools.map(tool))
-    .asJson
 
   /**
     * Serialises one part of what an author said, where it is something said. A

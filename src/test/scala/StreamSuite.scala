@@ -2,34 +2,31 @@ package com.alecdorrington.iris
 
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
-import fs2.Stream
+import com.alecdorrington.iris.Fixtures.{config, json}
+import fs2.{Pipe, Stream}
 import io.circe.Json
-import io.circe.parser.parse
 import munit.FunSuite
 
 /** Tests of reading a reply as it is written. */
 class StreamSuite extends FunSuite:
 
-  private val config = LlmConfig(
-    LlmProvider.Anthropic,
-    "key",
-    "model-x",
-    512,
-  )
-
-  private def json(body: String): Json = parse(body).toOption.get
-
-  /** The deltas read from a Server-Sent Events body, as one provider reads it. */
-  private def deltas(body: String)(read: Json => List[Delta]): List[Delta] =
+  /** The reply read from a Server-Sent Events body, as one provider reads it. */
+  private def reply(body: String)(read: Pipe[IO, Json, Delta]): List[Delta] =
     Stream
       .emits(body.getBytes("UTF-8"))
       .covary[IO]
       .through(Sse.events)
-      .map(read)
-      .flatMap(Stream.emits)
+      .through(read)
       .compile
       .toList
       .unsafeRunSync()
+
+  /**
+    * The deltas read from a Server-Sent Events body, as a provider which reads
+    * each of its events alone reads them.
+    */
+  private def deltas(body: String)(read: Json => List[Delta]): List[Delta] =
+    reply(body)(Sse.each(read))
 
   test("a data line carries its payload, and other lines carry none"):
     assertEquals(
@@ -93,12 +90,36 @@ data: [DONE]
 data: {"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}
 """
     assertEquals(
-      deltas(body)(GeminiClient.deltas),
+      reply(body)(GeminiClient.reply),
       List(
         Delta.Text("Hel"),
         Delta.Text("lo"),
         Delta.End(StopReason.Completed, Some(Usage(7, 3))),
       ),
+    )
+
+  test("gemini stops for a tool it asked for, however late it says it stopped"):
+    val body = """data: {"candidates":[{"content":{"parts":[{"text":"Let me look."}]}}]}
+
+data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"weather","args":{"city":"Zug"}}}]}}]}
+
+data: {"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}
+"""
+    assertEquals(
+      reply(body)(GeminiClient.reply),
+      List(
+        Delta.Text("Let me look."),
+        Delta.End(StopReason.ToolUse, Some(Usage(7, 3))),
+      ),
+    )
+
+  test("gemini stops for a tool it asked for in the same breath"):
+    val body =
+      """data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"weather","args":{"city":"Zug"}}}]},"finishReason":"STOP"}]}
+"""
+    assertEquals(
+      reply(body)(GeminiClient.reply),
+      List(Delta.End(StopReason.ToolUse, None)),
     )
 
   test("an event which says nothing new is not reported"):

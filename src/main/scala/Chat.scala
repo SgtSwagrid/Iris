@@ -120,6 +120,13 @@ final case class Message(role: Role, content: List[Part]):
   def uncached: Message =
     copy(content = content.filterNot(_ == Part.CacheBreakpoint))
 
+  /**
+    * Whether this message holds nothing but cache breakpoints, which say
+    * nothing to the model, and so is no message a provider will take.
+    */
+  private[iris] def saysNothing: Boolean =
+    content.forall(_ == Part.CacheBreakpoint)
+
   /** The results this message carries, which some providers send apart. */
   def toolResults: List[Part.ToolResult] = content.collect:
     case result: Part.ToolResult => result
@@ -198,6 +205,12 @@ final case class Chat
     * [[Part.CacheBreakpoint]], which is kept, so that the prefix is sent just
     * as the whole chat sends it. Nothing but the system message when no message
     * holds a breakpoint, which is no chat to send.
+    *
+    * It is a chat to send, and a provider answers only one which ends with the
+    * user saying something. So where the prefix does not, as when its last
+    * breakpoint opens a message, to cache only what came before, or closes one
+    * of the assistant's, it is followed by the least a user can say, which is
+    * no part of the prefix.
     */
   def cacheable: Chat =
     val last = messages.lastIndexWhere(_.content.contains(Part.CacheBreakpoint))
@@ -205,9 +218,27 @@ final case class Chat
       if last < 0 then List.empty
       else
         val message = messages(last)
-        messages.take(last) :+ message.copy(content =
-          message
-            .content
-            .take(message.content.lastIndexOf(Part.CacheBreakpoint) + 1),
+        asked(
+          messages.take(last) :+ message.copy(content =
+            message
+              .content
+              .take(message.content.lastIndexOf(Part.CacheBreakpoint) + 1),
+          ),
         ),
     )
+
+  /**
+    * The given messages, ending with the user saying something. Breakpoints
+    * which a last message holds alone mark the end of what came before it, so
+    * go there instead: onto the message before it where that is the user's, and
+    * otherwise into a message of the user's saying the least possible, which
+    * follows messages ending with the assistant's as well.
+    */
+  private def asked(prefix: List[Message]): List[Message] =
+    val (said, breakpoints) = prefix.lastOption.filter(_.saysNothing) match
+      case Some(empty) => (prefix.init, empty.content)
+      case None        => (prefix, List.empty)
+    said.lastOption.filter(_.role == Role.User) match
+      case Some(last) => said.init :+
+          last.copy(content = last.content ++ breakpoints)
+      case None => said :+ Message(Role.User, breakpoints :+ Part.Text("."))

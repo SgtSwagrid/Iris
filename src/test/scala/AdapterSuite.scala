@@ -1,18 +1,12 @@
 package com.alecdorrington.iris
 
+import com.alecdorrington.iris.Fixtures.{config, json}
 import io.circe.Json
-import io.circe.parser.{decode, parse}
+import io.circe.parser.decode
 import munit.FunSuite
 import scala.concurrent.duration.DurationInt
 
 class AdapterSuite extends FunSuite:
-
-  private val config = LlmConfig(
-    LlmProvider.Anthropic,
-    "key",
-    "model-x",
-    512,
-  )
 
   /** As [[config]], for the provider whose endpoints carry their model. */
   private val gemini = config.copy(provider = LlmProvider.Gemini)
@@ -25,14 +19,24 @@ class AdapterSuite extends FunSuite:
     .assistant("Hi!")
     .user("How are you?")
 
-  private def json(body: String): Json = parse(body).toOption.get
-
   private def roles(json: Json, field: String): Option[List[String]] = json
     .hcursor
     .downField(field)
     .as[List[Json]]
     .toOption
     .map(_.flatMap(_.hcursor.get[String]("role").toOption))
+
+  /** What the Anthropic adapter makes of the given response body. */
+  private def anthropicReply(body: String): Either[LlmError, Completion] =
+    decode[AnthropicClient.Response](body).toOption.get.completion
+
+  /** What the OpenAI adapter makes of the given response body. */
+  private def openAiReply(body: String): Either[LlmError, Completion] =
+    decode[OpenAiClient.Response](body).toOption.get.completion
+
+  /** What the Gemini adapter makes of the given response body. */
+  private def geminiReply(body: String): Either[LlmError, Completion] =
+    decode[GeminiClient.Response](body).toOption.get.completion
 
   test("anthropic requests include history, system and tuning options"):
     val body = json(AnthropicClient.requestJson(
@@ -74,6 +78,13 @@ class AdapterSuite extends FunSuite:
     assert(body.hcursor.downField("temperature").failed)
     assert(body.hcursor.downField("top_p").failed)
     assert(body.hcursor.downField("stop_sequences").failed)
+    val generation = json(GeminiClient.requestJson(config, chat, options))
+      .hcursor
+      .downField("generationConfig")
+    assert(generation.downField("maxOutputTokens").succeeded)
+    assert(generation.downField("temperature").failed)
+    assert(generation.downField("topP").failed)
+    assert(generation.downField("stopSequences").failed)
 
   test("anthropic omits sampling options for models that reject them"):
     val body = json(AnthropicClient.requestJson(
@@ -103,6 +114,8 @@ class AdapterSuite extends FunSuite:
 
   private val looking = Chat().user(Part.Text("What is this?"), picture)
 
+  private val paper = Chat().user(Part.Media("application/pdf", "JVBERi0="))
+
   test("a message of text alone is still sent as plain text"):
     val body  = json(AnthropicClient.requestJson(config, chat, options))
     val first = body.hcursor.downField("messages").downN(0)
@@ -128,8 +141,7 @@ class AdapterSuite extends FunSuite:
     )
 
   test("anthropic sends anything which is not a picture as a document"):
-    val paper = Chat().user(Part.Media("application/pdf", "JVBERi0="))
-    val body  = json(AnthropicClient.requestJson(config, paper, options))
+    val body = json(AnthropicClient.requestJson(config, paper, options))
     assertEquals(
       body
         .hcursor
@@ -155,7 +167,6 @@ class AdapterSuite extends FunSuite:
     )
 
   test("openai says it cannot carry a document in a chat"):
-    val paper = Chat().user(Part.Media("application/pdf", "JVBERi0="))
     assertEquals(
       OpenAiClient.pictorial(paper),
       Left(LlmError.Unsupported(
@@ -243,7 +254,7 @@ class AdapterSuite extends FunSuite:
          "stop_reason":"end_turn",
          "usage":{"input_tokens":10,"output_tokens":5}}"""
     assertEquals(
-      decode[AnthropicClient.Response](body).toOption.get.completion,
+      anthropicReply(body),
       Right(Completion(
         "Hello!",
         StopReason.Completed,
@@ -256,7 +267,7 @@ class AdapterSuite extends FunSuite:
       """{"choices":[{"message":{"content":"Hello!"},"finish_reason":"length"}],
          "usage":{"prompt_tokens":4,"completion_tokens":2}}"""
     assertEquals(
-      decode[OpenAiClient.Response](body).toOption.get.completion,
+      openAiReply(body),
       Right(Completion(
         "Hello!",
         StopReason.MaxTokens,
@@ -270,7 +281,7 @@ class AdapterSuite extends FunSuite:
          "finishReason":"STOP"}],
          "usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}"""
     assertEquals(
-      decode[GeminiClient.Response](body).toOption.get.completion,
+      geminiReply(body),
       Right(Completion(
         "Hello!",
         StopReason.Completed,
@@ -281,25 +292,21 @@ class AdapterSuite extends FunSuite:
   test("unrecognised stop reasons are preserved"):
     val body = """{"content":[],"stop_reason":"refusal","usage":null}"""
     assertEquals(
-      decode[AnthropicClient.Response](body)
-        .toOption
-        .get
-        .completion
-        .map(_.stopReason),
+      anthropicReply(body).map(_.stopReason),
       Right(StopReason.Other("refusal")),
     )
 
   test("a reply with no choices is a malformed openai response"):
     val body = """{"choices":[],"usage":null}"""
     assertEquals(
-      decode[OpenAiClient.Response](body).toOption.get.completion,
+      openAiReply(body),
       Left(LlmError.Malformed("OpenAI", "no choices")),
     )
 
   test("a blocked gemini prompt is malformed, and says why"):
     val body = """{"promptFeedback":{"blockReason":"SAFETY"}}"""
     assertEquals(
-      decode[GeminiClient.Response](body).toOption.get.completion,
+      geminiReply(body),
       Left(LlmError.Malformed(
         "Gemini",
         "no candidates, blocked as SAFETY",
@@ -309,7 +316,7 @@ class AdapterSuite extends FunSuite:
   test("a gemini reply with no candidates is malformed"):
     val body = """{"candidates":[]}"""
     assertEquals(
-      decode[GeminiClient.Response](body).toOption.get.completion,
+      geminiReply(body),
       Left(LlmError.Malformed("Gemini", "no candidates")),
     )
 
@@ -338,24 +345,33 @@ class AdapterSuite extends FunSuite:
     )
     assert(JsonHttp.answerable(LlmProvider.Gemini, chat).isRight)
 
+  test("a chat with a message saying nothing is not sent"):
+    assertEquals(
+      JsonHttp.answerable(
+        LlmProvider.Gemini,
+        chat.user(Part.CacheBreakpoint).user("Well?"),
+      ),
+      Left(LlmError.Unsendable(
+        "Gemini",
+        "one of its messages says nothing",
+      )),
+    )
+
+  /** A chat which asks the model to continue its own reply. */
+  private val prefilled = Chat().user("Hello").assistant("Once upon a")
+
   test("a model which refuses a prefill is not asked to continue one"):
-    val prefilled = Chat().user("Hello").assistant("Once upon a")
     assert(AnthropicClient.continuable(prefilled, "claude-sonnet-5").isLeft)
     assert(AnthropicClient.continuable(prefilled, "claude-opus-4-6").isLeft)
 
   test("a model which accepts a prefill still may be given one"):
-    val prefilled = Chat().user("Hello").assistant("Once upon a")
     assert(AnthropicClient.continuable(prefilled, "claude-haiku-4-5").isRight)
     assert(AnthropicClient.continuable(chat, "claude-sonnet-5").isRight)
 
   test("a stop reason the provider withheld is not one it gave"):
     val body = """{"content":[{"type":"text","text":"Hi"}]}"""
     assertEquals(
-      decode[AnthropicClient.Response](body)
-        .toOption
-        .get
-        .completion
-        .map(_.stopReason),
+      anthropicReply(body).map(_.stopReason),
       Right(StopReason.Unknown),
     )
 
@@ -363,11 +379,7 @@ class AdapterSuite extends FunSuite:
     val body = """{"content":[],"stop_reason":"end_turn",
          "usage":{"input_tokens":10}}"""
     assertEquals(
-      decode[AnthropicClient.Response](body)
-        .toOption
-        .get
-        .completion
-        .map(_.usage),
+      anthropicReply(body).map(_.usage),
       Right(None),
     )
 
@@ -375,7 +387,7 @@ class AdapterSuite extends FunSuite:
     val body =
       """{"choices":[{"message":{"content":"Hi"},"finish_reason":"stop"}]}"""
     assertEquals(
-      decode[OpenAiClient.Response](body).toOption.get.completion,
+      openAiReply(body),
       Right(Completion("Hi", StopReason.Completed, None)),
     )
 
@@ -383,11 +395,7 @@ class AdapterSuite extends FunSuite:
     val body = """{"content":[{"type":"thinking","text":"hmm"},
          {"type":"text","text":"Hello!"}],"stop_reason":"end_turn"}"""
     assertEquals(
-      decode[AnthropicClient.Response](body)
-        .toOption
-        .get
-        .completion
-        .map(_.text),
+      anthropicReply(body).map(_.text),
       Right("Hello!"),
     )
 

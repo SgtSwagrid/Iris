@@ -1,6 +1,7 @@
 package com.alecdorrington.iris
 
 import cats.effect.{Async, Resource}
+import cats.syntax.traverse.*
 import fs2.Stream
 import sttp.capabilities.fs2.Fs2Streams
 import sttp.client4.StreamBackend
@@ -64,4 +65,4 @@ object LlmStream:
     */
   def fromEnv[F[_] : Async]: Resource[F, Option[LlmStream[F]]] = LlmConfig
     .fromEnv
-    .fold(Resource.pure(None))(config => resource(config).map(Some(_)))
+    .traverse(resource[F](_))

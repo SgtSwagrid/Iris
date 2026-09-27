@@ -2,8 +2,9 @@ package com.alecdorrington.iris
 
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
+import com.alecdorrington.iris.Fixtures.{config, json}
 import io.circe.Json
-import io.circe.parser.{decode, parse}
+import io.circe.parser.decode
 import munit.FunSuite
 import sttp.client4.StringBody
 import sttp.client4.impl.cats.CatsMonadAsyncError
@@ -16,13 +17,6 @@ import sttp.model.StatusCode
   */
 class CacheSuite extends FunSuite:
 
-  private val config = LlmConfig(
-    LlmProvider.Anthropic,
-    "key",
-    "model-x",
-    512,
-  )
-
   private val options = CompletionOptions()
 
   /** A long document, shared by every request, then a question about it. */
@@ -33,8 +27,6 @@ class CacheSuite extends FunSuite:
       Part.CacheBreakpoint,
       Part.Text("A question about it."),
     )
-
-  private def json(body: String): Json = parse(body).toOption.get
 
   /** The content of the given message of a request body. */
   private def content(body: Json, message: Int): Json = body
@@ -125,6 +117,15 @@ class CacheSuite extends FunSuite:
     assert(AnthropicClient.breakable(many).isLeft)
     assert(AnthropicClient.breakable(chat).isRight)
 
+  test("anthropic counts the blocks breakpoints mark, not the breakpoints"):
+    val breakpoints =
+      List.fill(AnthropicClient.maxBreakpoints + 1)(Part.CacheBreakpoint)
+    val together = Chat().user(Part.Text("x") +: breakpoints*)
+    val leading  = Chat().user(breakpoints :+ Part.Text("x")*)
+    assert(AnthropicClient.breakable(together).isRight)
+    assert(AnthropicClient.breakable(leading).isRight)
+    assert(AnthropicClient.breakable(leading.withSystem("Be brief.")).isRight)
+
   test("openai and gemini are sent no breakpoints"):
     val openAi = json(OpenAiClient.requestJson(config, chat, options))
     assertEquals(
@@ -174,6 +175,53 @@ class CacheSuite extends FunSuite:
     assertEquals(
       Chat().user("Hi").cacheable.messages,
       Nil,
+    )
+
+  test("a prefix not ending with the user saying something is followed by it"):
+    val opening = Chat()
+      .user("Hello")
+      .assistant("Hi!")
+      .user(
+        Part.CacheBreakpoint,
+        Part.Text("How are you?"),
+      )
+    val closing = Chat()
+      .user("Hello")
+      .assistant(Part.Text("Hi!"), Part.CacheBreakpoint)
+      .user("How are you?")
+    List(opening, closing).foreach: whole =>
+      val prefix = whole.cacheable
+      assertEquals(
+        prefix.messages.map(_.role),
+        List(Role.User, Role.Assistant, Role.User),
+      )
+      assert(JsonHttp.answerable(LlmProvider.Anthropic, prefix).isRight)
+      assert(!prefix.messages.map(_.text).mkString.contains("How are you?"))
+      assertEquals(
+        content(
+          json(AnthropicClient.requestJson(config, prefix, options)),
+          1,
+        ),
+        content(
+          json(AnthropicClient.requestJson(config, whole, options)),
+          1,
+        ),
+      )
+
+  test("a breakpoint opening a message after the user's closes theirs"):
+    val whole = Chat()
+      .user("Hello")
+      .assistant(Part.CacheBreakpoint, Part.Text("Hi!"))
+      .user("How are you?")
+    assertEquals(
+      whole.cacheable.messages,
+      List(Message(
+        Role.User,
+        List(
+          Part.Text("Hello"),
+          Part.CacheBreakpoint,
+        ),
+      )),
     )
 
   test("anthropic reports cache reads and writes as input"):
@@ -233,10 +281,9 @@ class CacheSuite extends FunSuite:
   )
 
   /** Whether a request body carries only the chat's cacheable prefix. */
-  private def prefixOnly(body: Json): Boolean = body
-    .noSpaces
-    .contains("A long document.") &&
-    !body.noSpaces.contains("A question about it.")
+  private def prefixOnly(body: Json): Boolean =
+    val sent = body.noSpaces
+    sent.contains("A long document.") && !sent.contains("A question about it.")
 
   test("anthropic warms a prefix without asking for a reply"):
     val warming = expecting(
@@ -263,6 +310,71 @@ class CacheSuite extends FunSuite:
       prefixOnly(body),
     )
     assert(warming.warm(chat).attempt.unsafeRunSync().isRight)
+
+  /** A chat caching its system message alone, as a breakpoint opening it does. */
+  private val briefed = Chat()
+    .withSystem("A long document.")
+    .user(
+      Part.CacheBreakpoint,
+      Part.Text("A question about it."),
+    )
+
+  /**
+    * Whether a request body carries only the system message of [[briefed]], and
+    * messages each saying something, as every provider requires.
+    */
+  private def briefOnly
+    (
+      body: Json,
+      messages: String,
+      parts: String,
+    )
+    : Boolean =
+    val sent = body.noSpaces
+    sent.contains("A long document.") &&
+    !sent.contains("A question about it.") &&
+    body
+      .hcursor
+      .downField(messages)
+      .as[List[Json]]
+      .exists(all =>
+        all.nonEmpty && all.forall(
+          _.hcursor
+            .downField(parts)
+            .focus
+            .exists(said =>
+              said.asString.exists(_.nonEmpty) ||
+              said.asArray.exists(_.nonEmpty),
+            ),
+        ),
+      )
+
+  test("a breakpoint opening the first message warms the system message"):
+    val anthropic = expecting(
+      config,
+      """{"content":[],"stop_reason":"max_tokens"}""",
+    )(body =>
+      briefOnly(body, "messages", "content") &&
+      body
+        .hcursor
+        .downField("system")
+        .focus
+        .contains(Json.arr(marked("A long document."))),
+    )
+    val openAi = expecting(
+      config.copy(provider = LlmProvider.OpenAi),
+      """{"choices":[{"message":{"content":""},"finish_reason":"length"}]}""",
+    )(body =>
+      briefOnly(body, "messages", "content") &&
+      body.hcursor.downField("messages").downN(1).succeeded,
+    )
+    val gemini = expecting(
+      config.copy(provider = LlmProvider.Gemini),
+      """{"candidates":[{"content":{"parts":[{"text":""}]},
+         "finishReason":"MAX_TOKENS"}]}""",
+    )(briefOnly(_, "contents", "parts"))
+    List(anthropic, openAi, gemini).foreach: client =>
+      assert(client.warm(briefed).attempt.unsafeRunSync().isRight)
 
   test("a chat with nothing marked has nothing to warm"):
     val warming = expecting(

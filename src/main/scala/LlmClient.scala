@@ -2,6 +2,7 @@ package com.alecdorrington.iris
 
 import cats.MonadThrow
 import cats.effect.{Async, Resource}
+import cats.syntax.traverse.*
 import sttp.client4.Backend
 import sttp.client4.httpclient.cats.HttpClientCatsBackend
 
@@ -81,10 +82,10 @@ trait LlmClient[F[_]]:
     * each would pay to write its own.
     *
     * Worth it only before several requests: one request writes the prefix just
-    * as well by itself. The prefix must hold at least one message, and a chat
-    * with no [[Part.CacheBreakpoint]] has none to warm, so it is refused as
-    * [[LlmError.Unsendable]]. The model, tools and every other option must be
-    * those the requests will be sent with, since a cache is kept per model.
+    * as well by itself. A chat with no [[Part.CacheBreakpoint]] has no prefix
+    * to warm, so it is refused as [[LlmError.Unsendable]]. The model, tools and
+    * every other option must be those the requests will be sent with, since a
+    * cache is kept per model.
     *
     * @return
     *   An effect producing the provider's empty reply, whose usage says how
@@ -120,4 +121,4 @@ object LlmClient:
     */
   def fromEnv[F[_] : Async]: Resource[F, Option[LlmClient[F]]] = LlmConfig
     .fromEnv
-    .fold(Resource.pure(None))(config => resource(config).map(Some(_)))
+    .traverse(resource[F](_))
