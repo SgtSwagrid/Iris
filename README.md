@@ -224,4 +224,5 @@ Issues are very welcome; for anything more, please open an issue first.
 - [Hecate](https://github.com/SgtSwagrid/Hecate), a sibling, for user accounts, sessions, groups and permissions.
 - [Eunomia](https://github.com/SgtSwagrid/Eunomia), a sibling, for filtering, ordering and paging lists.
 - [Dike](https://github.com/SgtSwagrid/Dike), a sibling, for ranking by pairwise comparison, with a model as the judge.
+- [qr4s](https://github.com/SgtSwagrid/qr4s), a sibling, for generating QR codes, on the JVM and in the browser.
 - This library was made using [Scala Library Template](https://github.com/SgtSwagrid/scala-library-template).
