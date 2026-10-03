@@ -1,14 +1,13 @@
 package com.alecdorrington.iris
 
 /**
-  * A single-turn prompt to a large language model. For multi-turn
-  * conversations, use [[Chat]] instead.
+  * A single-turn prompt. For multi-turn conversations, use [[Chat]].
   *
   * @param user
-  *   The user message, containing the input for the task at hand.
+  *   The user message.
   *
   * @param system
-  *   An optional system message, establishing general model behaviour.
+  *   The system message, if any.
   */
 final case class Prompt
   (

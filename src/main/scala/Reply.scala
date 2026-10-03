@@ -7,21 +7,20 @@ package com.alecdorrington.iris
   *   The text of the reply.
   *
   * @param stopReason
-  *   The reason the model stopped generating.
+  *   The reason the model stopped.
   *
   * @param usage
   *   The token counts for the request, where the provider reports them.
   *
   * @param toolCalls
-  *   The tools the model asked to have run before it can go on. Empty unless
-  *   tools were offered and the model wanted one.
+  *   The tools the model asks to have run before it goes on, if any.
   */
-final case class Completion
+final case class Reply
   (
     text: String,
     stopReason: StopReason = StopReason.Completed,
     usage: Option[Usage] = None,
-    toolCalls: List[Part.ToolRequest] = List.empty,
+    toolCalls: List[Part.ToolCall] = List.empty,
   )
 
 /** The reason a model stopped generating, normalised across providers. */
@@ -30,16 +29,21 @@ enum StopReason:
   /** The model finished its reply naturally. */
   case Completed
 
-  /** The reply was truncated upon reaching the token limit. */
+  /** The reply was cut off at the token limit. */
   case MaxTokens
 
-  /** The reply ended upon producing a configured stop sequence. */
+  /** The reply reached one of the stop sequences. */
   case StopSequence
 
-  /** The model stopped to await the result of a tool it asked for. */
-  case ToolUse
+  /** The model stopped to await the result of a tool it called. */
+  case ToolCall
 
-  /** A provider-specific reason not covered by the other cases. */
+  /**
+    * A provider-specific reason not covered by the other cases.
+    *
+    * @param reason
+    *   The provider's name for the reason.
+    */
   case Other(reason: String)
 
   /** The provider did not say why the model stopped. */
@@ -47,25 +51,20 @@ enum StopReason:
 
 object StopReason:
 
-  /**
-    * Normalises a provider-specific stop reason, given that provider's labels
-    * for the [[Completed]] and [[MaxTokens]] cases, and optionally for
-    * [[StopSequence]] and [[ToolUse]]. An unrecognised label is preserved as
-    * [[Other]], and a reason the provider did not give at all is [[Unknown]].
-    */
+  /** Normalises a provider's stop reason by its labels for each case. */
   private[iris] def normalise
     (
       completed: String,
       maxTokens: String,
       stopSequence: Option[String] = None,
-      toolUse: Option[String] = None,
+      toolCall: Option[String] = None,
     )
     (reason: Option[String])
     : StopReason = reason match
     case Some(`completed`)                           => Completed
     case Some(`maxTokens`)                           => MaxTokens
     case Some(other) if stopSequence.contains(other) => StopSequence
-    case Some(other) if toolUse.contains(other)      => ToolUse
+    case Some(other) if toolCall.contains(other)     => ToolCall
     case Some(other)                                 => Other(other)
     case None                                        => Unknown
 
@@ -73,15 +72,13 @@ object StopReason:
   * The token counts for one request, as reported by the provider.
   *
   * @param inputTokens
-  *   The number of tokens in the request, including the entire chat history.
+  *   The number of tokens in the request, the whole chat included.
   *
   * @param outputTokens
-  *   The number of tokens in the model's reply.
+  *   The number of tokens in the reply.
   *
   * @param cachedTokens
-  *   How many of the [[inputTokens]] were read from the provider's cache,
-  *   rather than processed afresh, as a prefix marked by a
-  *   [[Part.CacheBreakpoint]] can be.
+  *   The number of the [[inputTokens]] read from the provider's cache.
   */
 final case class Usage
   (
@@ -93,10 +90,8 @@ final case class Usage
 object Usage:
 
   /**
-    * The usage a provider reported, where it reported both counts. Providers
-    * omit them, individually or altogether, on a reply they did not give, so
-    * neither is required of them. A provider which reports nothing of its cache
-    * read nothing from it.
+    * The usage, where both counts are reported, as providers may omit them on a
+    * failed reply. An unreported cache read counts as `0`.
     */
   private[iris] def of
     (

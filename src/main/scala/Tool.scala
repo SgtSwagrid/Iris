@@ -3,23 +3,19 @@ package com.alecdorrington.iris
 import io.circe.Json
 
 /**
-  * A tool the model may ask to have run on its behalf. Offered per request
-  * through [[CompletionOptions.tools]]; a model which wants one says so in
-  * [[Completion.toolCalls]], and the answer travels back as a
-  * [[Part.ToolResult]] in the next message.
-  *
-  * Iris never runs a tool itself. What a tool does, whether it is allowed to do
-  * it, and how long it may take are the host's to decide.
+  * A tool the model may ask to have run, offered through
+  * [[ReplyOptions.tools]]. The model asks in [[Reply.toolCalls]], and the host
+  * answers with a [[Part.ToolResult]]. Iris never runs a tool itself.
   *
   * @param name
-  *   The name the model calls this tool by, unique among those offered.
+  *   The name the model calls the tool by, unique among those offered.
   *
   * @param description
-  *   What the tool does, in words, which is what the model chooses by.
+  *   The description of what the tool does, by which the model chooses it.
   *
   * @param parameters
-  *   A [JSON Schema](https://json-schema.org) object describing the arguments
-  *   the tool takes. Every provider here speaks this dialect.
+  *   The [JSON Schema](https://json-schema.org) object describing the tool's
+  *   arguments.
   */
 final case class Tool
   (

@@ -5,26 +5,20 @@ import io.circe.Json
 import io.circe.parser.parse
 
 /**
-  * Reading a [Server-Sent
+  * Reading of a [Server-Sent
   * Events](https://html.spec.whatwg.org/multipage/server-sent-events.html)
-  * body, which is how all three providers deliver a reply as it is written.
+  * body.
   */
 private[iris] object Sse:
 
-  /** The marker with which a provider says a stream is over. */
-  private val done = "[DONE]"
+  private val endMarker = "[DONE]"
 
-  /**
-    * The payload of one line, where the line carries one. Every other line — an
-    * event name, a comment, the blank line between events — says nothing this
-    * library needs, since the payload names its own kind.
-    */
+  /** The payload of a `data:` line; other lines are ignored. */
   def data(line: String): Option[String] = Option
     .when(line.startsWith("data:"))(line.drop("data:".length).trim)
     .filter(_.nonEmpty)
-    .filterNot(_ == done)
+    .filterNot(_ == endMarker)
 
-  /** The events of a Server-Sent Events body, as the JSON they carry. */
   def events[F[_]](body: Stream[F, Byte]): Stream[F, Json] = body
     .through(text.utf8.decode)
     .through(text.lines)
@@ -35,11 +29,10 @@ private[iris] object Sse:
       case Right(json) => json
 
   /**
-    * The reply which the given events make up, where each says what it says
-    * alone, as the given function reads it: into a list, because a provider may
-    * end a reply in the same breath as finishing it.
+    * Reads each event alone into deltas, a list as one event may carry both
+    * text and the end.
     */
-  def each[F[_]]
+  def separately[F[_]]
     (read: Json => List[Delta])
     (events: Stream[F, Json])
     : Stream[F, Delta] = events.map(read).flatMap(Stream.emits)

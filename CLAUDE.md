@@ -14,36 +14,54 @@ Keep it concise and actionable.
 This is Iris, a Scala 3 library giving one provider-agnostic interface to the APIs of large language models, with
 adapters for Anthropic, OpenAI and Google Gemini, built on Cats Effect, sttp and Circe. It is in beta.
 
-It is a single JVM module in `com.alecdorrington.iris`. `LlmClient` is the public interface (`send` a `Chat`,
-or `complete` a `Prompt`), with one adapter per `LlmProvider` (`AnthropicClient`, `OpenAiClient`, `GeminiClient`,
-sharing `JsonHttp`). `LlmConfig` holds provider, key, model, token limit and an optional base URL, and
-`LlmConfig.fromEnv` reads them from `LLM_*` and the providers' `*_API_KEY` variables.
+It is a single JVM module in `com.alecdorrington.iris`. `LlmClient` is the public interface (`send` a `Chat`
+or a `Prompt`). Each `LlmProvider` has one `ProviderApi` object (`AnthropicApi`, `OpenAiApi`, `GeminiApi`, sharing
+`JsonHttp`), which tells the one `JsonClient` and the one `SseClient` all they need to know of it: its endpoints,
+request bodies, credentials, the chats it refuses, how its replies read, and how it counts tokens. Anything
+provider-specific goes there, never in the clients. `LlmConfig` holds a model (and so its provider), key, token limit and an optional base URL, and
+`LlmConfig.fromEnv` reads them from `LLM_*` and the providers' `*_API_KEY` variables (`LlmConfig.from` through a
+lookup of the host's), with the token limit when `LLM_MAX_TOKENS` is unset a parameter, for hosts whose replies run
+longer.
 
 - Clients are stateless: no session identity reaches the provider, and a conversation's whole history travels with
   each `Chat`. Keep it that way.
-- Every adapter must normalise what it returns: the reply text, a `StopReason` (unknown labels kept as `Other`) and
-  token usage in `Completion`. An unsuccessful response is `LlmError.Http` (status and body) and an unreadable one
+- Every `ProviderApi` must normalise what it returns: the reply text, a `StopReason` (unknown labels kept as `Other`) and
+  token usage in `Reply`. An unsuccessful response is `LlmError.Unsuccessful` (status and body) and an unreadable one
   `LlmError.Malformed`, so hosts can tell rate limits from broken responses; transport failures are sttp's own.
-- A set but unrecognised `LLM_PROVIDER` means unconfigured (`None`), never a fall back to key inference.
+- Models are `LlmModel` cases, never strings: each names the provider serving it (`LlmConfig.provider` is its model's)
+  and its API `id`, which `LlmModel.parse` reads back. A model Iris does not list is an `LlmModel.Other`,
+  made only by `LlmModel.of(provider, id)` (so that a listed id is always its listed case, and a blank one none, and
+  Gemini's `models/` is dropped) and read as `provider:id`, so that a bare name must still be a listed one; list a new model as a case of its own. What one provider's models differ in
+  (Anthropic's sampling and prefill) is kept in its `ProviderApi` (`AnthropicApi`), as sets of the cases that still allow it, so that `Other`
+  is taken to be as new as the newest. A client prompts its configuration's model alone: no option names another,
+  so a request can never reach a provider that does not serve its model. `LlmProvider.defaultModel` must stay a `def`: as a
+  constructor parameter, the two enums would each read the other while it is still being made, and see `null`.
+- A set but unrecognised `LLM_PROVIDER` or `LLM_MODEL` means unconfigured (`None`), never a fall back to key inference.
 - The library does no throttling, retrying or logging of its own; those are the host's to wrap around a client.
-  Nor does it run a tool it is asked for: `CompletionOptions.tools` offers them and `Completion.toolCalls`
+  Nor does it run a tool it is asked for: `ReplyOptions.tools` offers them and `Reply.toolCalls`
   reports what was asked, but what a tool does, and whether it may, is the host's.
 - A `Part.CacheBreakpoint` ends a prefix worth caching and says nothing to the model. Anthropic is told of one by
   `cache_control` on the block before it (in its message, else the previous message's last, else the system message),
   marking at most four blocks per chat, counted as sent (breakpoints in a row mark one); OpenAI and Gemini cache
-  prefixes unasked and are sent nothing, so their adapters drop them (`Message.uncached`). `LlmClient.warm` sends
-  `Chat.cacheable` with the least reply the provider allows (Anthropic `max_tokens: 0`, others 1); a wrapper around a
-  client must forward `warm`, not inherit the default. `cacheable` always ends with the user saying something:
+  prefixes unasked and are sent nothing, so their APIs drop them (`Message.uncached`). `LlmClient.warm` sends
+  `Chat.cacheable` with the least reply the provider allows (`ProviderApi.leastReply`: Anthropic `max_tokens: 0`,
+  others 1); a wrapper around a
+  client must forward `warm`, not inherit the default, which `LlmClient.Forwarding` (override only what changes) and
+  `mapK` (one transformation for every request) both do. `cacheable` always ends with the user saying something:
   breakpoints left alone in the last message move back to what came before, and a prefix ending at the system message
   or the assistant's turn is followed by a user message of `.`. `Usage.inputTokens` counts the whole prompt on every
   provider (Anthropic's `input_tokens` leaves the cache out, so its reads and writes are added back) and
   `Usage.cachedTokens` the part read from the cache.
-- Unset optional fields are omitted one level deep, by `JsonHttp.obj`/`requestBody`. Never deep-drop nulls: inside a
+- `ReplyOptions.effort` (`Effort`, `Low` to `Max`) is sent as Anthropic's `output_config.effort`, OpenAI's
+  `reasoning_effort` (`Max` as `high`, its highest) and Gemini's `generationConfig.thinkingConfig.thinkingBudget`
+  (fixed amounts within every thinking Gemini model's range). Iris never chooses one, and a model that cannot take one
+  refuses the request; retrying at a lower effort is the host's to do.
+- Unset optional fields are omitted one level deep, by `JsonHttp.objectOf`/`body`. Never deep-drop nulls: inside a
   tool's schema or a tool call's arguments, a null is a value.
-- `LlmStream` is a capability apart from `LlmClient`, since streaming needs a backend which can stream.
-  Its adapters extend `SseClient` as the others extend `JsonClient`, and reuse the same request bodies. Each reads the
-  whole stream of events (`reply`), most one event at a time (`Sse.each`); Gemini's remembers across events whether a
-  tool was asked for, as it may say so before it says it stopped.
+- `LlmStreamer` is a capability apart from `LlmClient`, since streaming needs a backend which can stream.
+  `SseClient` speaks the same `ProviderApi` as `JsonClient`, with the same request bodies (`streamed`). Each
+  `ProviderApi.reply` reads the whole stream of events, most one event at a time (`Sse.separately`). Gemini's
+  remembers across events whether a tool was asked for, as it may say so before it says it stopped.
 - `LlmConfig.toString` redacts the API key, so hosts may log a configuration. Keep any new secret out of `toString`
   and out of `LlmError` messages likewise.
 
@@ -83,6 +101,11 @@ changes, overwriting whatever is here. So make changes there, never here. The sh
 ### Code Style
 
 - You must read the [Code Style Guidelines](docs/STYLE_GUIDE.md).
+- Document every public type and member: a summary, then `@param` for each explicit parameter,
+  `@tparam` for each type parameter, and `@return` for any result but `Unit`, each one short
+  sentence. Summaries read: types "A ...", values "The ...", Booleans "Whether ...", methods a
+  third-person verb ("Sends ..."), never "Returns ...". Private members get a comment only for a
+  non-obvious contract or gotcha, usually in one sentence.
 
 ### Pull Requests
 

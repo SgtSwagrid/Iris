@@ -4,11 +4,7 @@ import sbt.Keys._
 import sbtunidoc.BaseUnidocPlugin.autoImport.*
 import sbtunidoc.ScalaUnidocPlugin
 
-// This build is developed as part of a larger private project,
-// which includes it by reference and from which it is automatically synchronised.
-// The project is named after the library, so that it doesn't clash with a host's own.
-
-val scala3 = "3.8.4"
+val scala3 = "3.9.0"
 
 ThisBuild / scalaVersion := scala3
 
@@ -22,11 +18,9 @@ ThisBuild / scalacOptions ++= Seq(
   "-Wunused:all",
 )
 
-/**
-  * A provider-agnostic client for the APIs of large language models, with an
-  * adapter for each supported provider. JVM only, as it makes its requests
-  * through the JDK's own HTTP client.
-  */
+// Named after the library so as not to clash with the projects of a build that
+// includes this one by reference. JVM only, as requests go through the JDK's
+// HTTP client.
 lazy val iris = project
   .in(file("."))
   .enablePlugins(ScalaUnidocPlugin)

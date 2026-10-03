@@ -1,25 +1,28 @@
 package com.alecdorrington.iris
 
 /**
-  * A piece of a reply, as it arrives over a [[LlmStream]]. A reply is a run of
-  * [[Text]] followed by one [[End]]; what a provider sends in between which
-  * says nothing new is not reported.
+  * A piece of a reply arriving over an [[LlmStreamer]]: a run of [[Text]]
+  * followed by one [[End]].
   */
 enum Delta:
 
-  /** More of the reply's text, to be appended to what came before. */
+  /**
+    * More of the reply's text, to append to what came before.
+    *
+    * @param text
+    *   The new text.
+    */
   case Text(text: String)
 
   /**
-    * The reply has ended, and nothing more will arrive.
+    * The end of the reply.
     *
     * @param stopReason
-    *   Why the model stopped, normalised as it is for a [[Completion]].
+    *   The reason the model stopped.
     *
     * @param usage
-    *   The token counts, where the provider reports them as it ends. Anthropic
-    *   counts the input at the start of a stream rather than the end, so the
-    *   two halves never meet here; `send` remains the way to have both.
+    *   The token counts, where the provider reports them at the end. Anthropic
+    *   reports none here; use [[LlmClient.send]] for its usage.
     */
   case End
     (

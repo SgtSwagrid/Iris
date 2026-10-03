@@ -7,10 +7,8 @@ import fs2.{Pipe, Stream}
 import io.circe.Json
 import munit.FunSuite
 
-/** Tests of reading a reply as it is written. */
 class StreamSuite extends FunSuite:
 
-  /** The reply read from a Server-Sent Events body, as one provider reads it. */
   private def reply(body: String)(read: Pipe[IO, Json, Delta]): List[Delta] =
     Stream
       .emits(body.getBytes("UTF-8"))
@@ -21,12 +19,8 @@ class StreamSuite extends FunSuite:
       .toList
       .unsafeRunSync()
 
-  /**
-    * The deltas read from a Server-Sent Events body, as a provider which reads
-    * each of its events alone reads them.
-    */
   private def deltas(body: String)(read: Json => List[Delta]): List[Delta] =
-    reply(body)(Sse.each(read))
+    reply(body)(Sse.separately(read))
 
   test("a data line carries its payload, and other lines carry none"):
     assertEquals(
@@ -58,7 +52,7 @@ event: message_stop
 data: {"type":"message_stop"}
 """
     assertEquals(
-      deltas(body)(AnthropicClient.deltas),
+      deltas(body)(AnthropicApi.deltas),
       List(
         Delta.Text("Hel"),
         Delta.Text("lo"),
@@ -76,7 +70,7 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":
 data: [DONE]
 """
     assertEquals(
-      deltas(body)(OpenAiClient.deltas),
+      deltas(body)(OpenAiApi.deltas),
       List(
         Delta.Text("Hel"),
         Delta.Text("lo"),
@@ -90,7 +84,7 @@ data: [DONE]
 data: {"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}
 """
     assertEquals(
-      reply(body)(GeminiClient.reply),
+      reply(body)(GeminiApi.reply),
       List(
         Delta.Text("Hel"),
         Delta.Text("lo"),
@@ -106,10 +100,10 @@ data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"weather","arg
 data: {"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}
 """
     assertEquals(
-      reply(body)(GeminiClient.reply),
+      reply(body)(GeminiApi.reply),
       List(
         Delta.Text("Let me look."),
-        Delta.End(StopReason.ToolUse, Some(Usage(7, 3))),
+        Delta.End(StopReason.ToolCall, Some(Usage(7, 3))),
       ),
     )
 
@@ -118,8 +112,8 @@ data: {"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}],
       """data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"weather","args":{"city":"Zug"}}}]},"finishReason":"STOP"}]}
 """
     assertEquals(
-      reply(body)(GeminiClient.reply),
-      List(Delta.End(StopReason.ToolUse, None)),
+      reply(body)(GeminiApi.reply),
+      List(Delta.End(StopReason.ToolCall, None)),
     )
 
   test("an event which says nothing new is not reported"):
@@ -130,7 +124,7 @@ data: {"type":"content_block_start","index":0}
 data: {"type":"ping"}
 """
     assertEquals(
-      deltas(body)(AnthropicClient.deltas),
+      deltas(body)(AnthropicApi.deltas),
       List.empty,
     )
 
@@ -139,15 +133,15 @@ data: {"type":"ping"}
       """data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}
 """
     assertEquals(
-      deltas(body)(AnthropicClient.deltas),
+      deltas(body)(AnthropicApi.deltas),
       List(Delta.End(StopReason.MaxTokens, None)),
     )
 
   test("a streaming request asks to be streamed"):
-    val body = json(AnthropicClient.requestJson(
+    val body = json(AnthropicApi.body(
       config,
       Chat().user("Hi"),
-      CompletionOptions(),
+      ReplyOptions(),
       true,
     ))
     assertEquals(
@@ -156,18 +150,18 @@ data: {"type":"ping"}
     )
 
   test("an ordinary request does not ask to be streamed"):
-    val body = json(AnthropicClient.requestJson(
+    val body = json(AnthropicApi.body(
       config,
       Chat().user("Hi"),
-      CompletionOptions(),
+      ReplyOptions(),
     ))
     assert(body.hcursor.downField("stream").failed)
 
   test("openai asks for the usage a stream would otherwise withhold"):
-    val body = json(OpenAiClient.requestJson(
+    val body = json(OpenAiApi.body(
       config,
       Chat().user("Hi"),
-      CompletionOptions(),
+      ReplyOptions(),
       true,
     ))
     assertEquals(
@@ -180,9 +174,9 @@ data: {"type":"ping"}
     )
 
   test("gemini streams from an endpoint of its own"):
-    val gemini = config.copy(provider = LlmProvider.Gemini)
+    val gemini = config.copy(model = LlmModel.Gemini2_5Flash)
     assertEquals(
-      GeminiClient.streaming(gemini, "gemini-2.5-flash").map(_.toString),
+      GeminiApi.streaming(gemini, LlmModel.Gemini2_5Flash).map(_.toString),
       Right(
         "https://generativelanguage.googleapis.com" +
           "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
