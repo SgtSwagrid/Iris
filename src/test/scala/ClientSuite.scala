@@ -9,18 +9,12 @@ import sttp.client4.impl.cats.CatsMonadAsyncError
 import sttp.client4.testing.{BackendStub, ResponseStub}
 import sttp.model.{Header, StatusCode}
 
-/**
-  * Tests of a whole [[LlmClient]], over a stubbed backend, covering what the
-  * adapters do with a response rather than what they put in a request.
-  */
 class ClientSuite extends FunSuite:
 
-  /** As [[config]], but for Gemini. */
-  private val gemini = config.copy(provider = LlmProvider.Gemini)
+  private val gemini = config.copy(model = LlmModel.Gemini2_5Flash)
 
   private val prompt = Prompt("Hello")
 
-  /** A client answering every request with the given response. */
   private def client
     (
       body: String,
@@ -35,36 +29,36 @@ class ClientSuite extends FunSuite:
       .thenRespond(ResponseStub.adjust(body, status, headers)),
   )
 
-  /** What the given client makes of its one stubbed response. */
-  private def result(client: LlmClient[IO]): Either[Throwable, Completion] =
-    client.complete(prompt).attempt.unsafeRunSync()
+  private def result(client: LlmClient[IO]): Either[Throwable, Reply] = client
+    .send(prompt)
+    .attempt
+    .unsafeRunSync()
 
-  /** What the given client makes of counting the prompt. */
   private def counted(client: LlmClient[IO]): Either[Throwable, Int] = client
     .count(prompt)
     .attempt
     .unsafeRunSync()
 
-  test("a successful response becomes a completion"):
+  test("a successful response becomes a reply"):
     val body = """{"content":[{"type":"text","text":"Hi"}],
          "stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}"""
     assertEquals(
       result(client(body)),
-      Right(Completion(
+      Right(Reply(
         "Hi",
         StopReason.Completed,
         Some(Usage(3, 1)),
       )),
     )
 
-  test("an unsuccessful response is an http error carrying its status"):
+  test("an unsuccessful response is an error carrying its status"):
     val failure = result(client(
       "rate limited",
       StatusCode.TooManyRequests,
     ))
     assertEquals(
       failure,
-      Left(LlmError.Http(
+      Left(LlmError.Unsuccessful(
         "Anthropic",
         StatusCode.TooManyRequests,
         None,
@@ -83,7 +77,7 @@ class ClientSuite extends FunSuite:
         .left
         .toOption
         .collect:
-          case LlmError.Http(_, _, retryAfter, _) => retryAfter
+          case LlmError.Unsuccessful(_, _, retryAfter, _) => retryAfter
       ,
       Some(Some(30.seconds)),
     )
@@ -133,11 +127,42 @@ class ClientSuite extends FunSuite:
     )
 
   test("openai says it cannot count rather than guessing"):
-    val openAi = config.copy(provider = LlmProvider.OpenAi)
+    val openAi = config.copy(model = LlmModel.Gpt5)
     assertEquals(
       counted(client("{}", config = openAi)),
       Left(LlmError.Unsupported("OpenAI", "counting tokens")),
     )
+
+  test("each provider is sent its key where it looks for it"):
+    List(
+      (
+        LlmProvider.Anthropic,
+        "x-api-key",
+        "key",
+        """{"content":[],"stop_reason":"end_turn"}""",
+      ),
+      (
+        LlmProvider.OpenAi,
+        "Authorization",
+        "Bearer key",
+        """{"choices":[{"message":{"content":"Hi"},"finish_reason":"stop"}]}""",
+      ),
+      (
+        LlmProvider.Gemini,
+        "x-goog-api-key",
+        "key",
+        """{"candidates":[{"content":{"parts":[{"text":"Hi"}]}}]}""",
+      ),
+    ).foreach: (provider, name, key, body) =>
+      val keyed = LlmClient[IO](
+        config.copy(model = provider.defaultModel),
+        BackendStub(CatsMonadAsyncError[IO])
+          .whenRequestMatches(_.header(name).contains(key))
+          .thenRespond(ResponseStub.adjust(body, StatusCode.Ok))
+          .whenAnyRequest
+          .thenRespond(ResponseStub.adjust("unkeyed", StatusCode.Unauthorized)),
+      )
+      assert(result(keyed).isRight, provider)
 
   test("each provider is given its own adapter"):
     val body = """{"candidates":[{"content":{"parts":[{"text":"Hei"}]},

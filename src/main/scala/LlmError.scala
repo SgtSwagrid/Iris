@@ -4,83 +4,83 @@ import scala.concurrent.duration.FiniteDuration
 import sttp.model.StatusCode
 
 /**
-  * An error produced while communicating with an LLM provider. Structured so
-  * that callers can tell retryable failures (e.g. rate limits) apart from
-  * configuration mistakes and broken responses.
+  * An error communicating with an LLM provider.
+  *
+  * @param message
+  *   The error's message.
   */
 enum LlmError(message: String) extends Exception(message):
 
   /**
-    * The provider returned an unsuccessful HTTP status.
+    * An unsuccessful HTTP status from the provider.
     *
-    * @param providerName
+    * @param provider
     *   The name of the provider, for display.
     *
-    * @param code
-    *   The HTTP status code of the response.
+    * @param status
+    *   The HTTP status.
     *
     * @param retryAfter
-    *   How long the provider asked us to wait before trying again, where it
-    *   said. Set on a rate limit, and on some outages.
+    *   The time the provider asked to wait before retrying, where it said, as
+    *   on a rate limit.
     *
     * @param detail
-    *   The response body, which usually describes the failure.
+    *   The response body.
     */
-  case Http
+  case Unsuccessful
     (
-      providerName: String,
-      code: StatusCode,
+      provider: String,
+      status: StatusCode,
       retryAfter: Option[FiniteDuration],
       detail: String,
-    ) extends LlmError(s"$providerName request failed ($code): $detail")
+    ) extends LlmError(s"$provider request failed ($status): $detail")
 
   /**
-    * The provider returned a response whose body could not be decoded.
+    * A response body that could not be decoded.
     *
-    * @param providerName
+    * @param provider
     *   The name of the provider, for display.
     *
     * @param detail
-    *   A description of the decoding failure.
+    *   The description of the decoding failure.
     */
-  case Malformed(providerName: String, detail: String)
-    extends LlmError(s"Unexpected $providerName response: $detail")
+  case Malformed(provider: String, detail: String)
+    extends LlmError(s"Unexpected $provider response: $detail")
 
   /**
-    * The client is configured in a way it cannot be used, such as with a base
-    * URL which is not a URL. Raised in place of the request it prevented.
+    * A configuration that cannot be used, such as a base URL that is no URL. No
+    * request is made.
     *
-    * @param providerName
+    * @param provider
     *   The name of the provider, for display.
     *
     * @param detail
-    *   A description of what cannot be used.
+    *   The description of what cannot be used.
     */
-  case Misconfigured(providerName: String, detail: String)
-    extends LlmError(s"Cannot address $providerName: $detail")
+  case Misconfigured(provider: String, detail: String)
+    extends LlmError(s"Cannot address $provider: $detail")
 
   /**
-    * The chat is one this provider will not answer, so it was not asked to.
-    * Raised in place of the request it prevented.
+    * A chat the provider would refuse. No request is made.
     *
-    * @param providerName
+    * @param provider
     *   The name of the provider, for display.
     *
     * @param detail
-    *   A description of what the provider would not have answered.
+    *   The description of what the provider would refuse.
     */
-  case Unsendable(providerName: String, detail: String)
-    extends LlmError(s"$providerName will not answer this chat: $detail")
+  case Unsendable(provider: String, detail: String)
+    extends LlmError(s"$provider will not answer this chat: $detail")
 
   /**
-    * The provider's API offers no way to do what was asked, so nothing was
-    * asked of it. Not a failure of one request, but of every such request.
+    * An operation the provider's API does not offer, which fails every time. No
+    * request is made.
     *
-    * @param providerName
+    * @param provider
     *   The name of the provider, for display.
     *
     * @param detail
-    *   A description of what the provider cannot do.
+    *   The description of what the provider cannot do.
     */
-  case Unsupported(providerName: String, detail: String)
-    extends LlmError(s"$providerName cannot do this: $detail")
+  case Unsupported(provider: String, detail: String)
+    extends LlmError(s"$provider cannot do this: $detail")

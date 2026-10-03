@@ -1,105 +1,109 @@
 package com.alecdorrington.iris
 
+import java.util.Locale
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 /**
-  * The set of supported LLM providers, and what each one is. Everything here is
-  * true of the provider rather than of one request to it, so an adapter need
-  * not carry its own copy.
+  * A supported LLM provider.
   *
   * @param displayName
-  *   The provider's name as it is written, for display and in errors.
+  *   The provider's name for display and in errors.
   *
   * @param origin
   *   The origin of the provider's API, used unless one is configured.
-  *
-  * @param defaultModel
-  *   The model used for this provider when none is configured explicitly.
   */
 enum LlmProvider
   (
     val displayName: String,
     val origin: String,
-    val defaultModel: String,
   ):
 
+  /** Anthropic's Messages API. */
   case Anthropic
     extends LlmProvider(
       "Anthropic",
       "https://api.anthropic.com",
-      "claude-sonnet-5",
     )
 
-  case OpenAi
-    extends LlmProvider(
-      "OpenAI",
-      "https://api.openai.com",
-      "gpt-5",
-    )
+  /** OpenAI's Chat Completions API. */
+  case OpenAi extends LlmProvider("OpenAI", "https://api.openai.com")
 
+  /** Google's Gemini API. */
   case Gemini
     extends LlmProvider(
       "Gemini",
       "https://generativelanguage.googleapis.com",
-      "gemini-2.5-flash",
     )
+
+  /** The model prompted when none is configured. */
+  def defaultModel: LlmModel = this match
+    case Anthropic => LlmModel.ClaudeSonnet5_5
+    case OpenAi    => LlmModel.Gpt5
+    case Gemini    => LlmModel.Gemini2_5Flash
+
+  /** The provider's name as [[LlmProvider.parse]] reads it, such as `openai`. */
+  def key: String = toString.toLowerCase(Locale.ROOT)
 
 object LlmProvider:
 
-  /** Parses a provider from its name, case-insensitively. */
-  def parse(name: String): Option[LlmProvider] = name.trim.toLowerCase match
-    case "anthropic"         => Some(Anthropic)
-    case "openai"            => Some(OpenAi)
-    case "gemini" | "google" => Some(Gemini)
-    case _                   => None
+  /**
+    * Parses a provider from its name, ignoring case.
+    *
+    * @param name
+    *   The name: `anthropic`, `openai`, or `gemini` or `google`.
+    *
+    * @return
+    *   A provider, or `None` for an unknown name.
+    */
+  def parse(name: String): Option[LlmProvider] =
+    // Not the default locale: by Turkish rules, `OPENAI` lowers to `openaı`.
+    name.trim.toLowerCase(Locale.ROOT) match
+      case "anthropic"         => Some(Anthropic)
+      case "openai"            => Some(OpenAi)
+      case "gemini" | "google" => Some(Gemini)
+      case _                   => None
 
 /**
-  * Configuration for connecting to an LLM provider.
-  *
-  * @param provider
-  *   The provider whose API is to be used.
-  *
-  * @param apiKey
-  *   The API key used to authenticate with the provider.
+  * A configuration for connecting to the LLM provider serving its model. Its
+  * `toString` leaves out the API key, so it is safe to log.
   *
   * @param model
-  *   The name of the model to prompt, unless overridden per request.
+  *   The model to prompt; another model needs another configuration.
+  *
+  * @param apiKey
+  *   The API key to authenticate with.
   *
   * @param maxTokens
-  *   The maximum number of tokens permitted in each completion, unless
-  *   overridden per request.
+  *   The reply's token limit, unless overridden per request.
   *
   * @param baseUrl
-  *   Overrides the provider's API origin (scheme and host, with no trailing
-  *   `/`), e.g. to reach a proxy, a compatible third-party endpoint, or a stub
-  *   in tests. The provider's own origin is used when unset.
+  *   The API origin (scheme and host, with no trailing `/`) overriding the
+  *   provider's, such as a proxy's or a test stub's.
   *
   * @param timeout
-  *   How long to wait for a completion before giving up. Generous by default,
-  *   because producing a long one can take a model several minutes.
+  *   The time to wait for a reply before giving up.
   */
 final case class LlmConfig
   (
-    provider: LlmProvider,
+    model: LlmModel,
     apiKey: String,
-    model: String,
     maxTokens: Int,
     baseUrl: Option[String] = None,
     timeout: FiniteDuration = LlmConfig.defaultTimeout,
   ):
 
-  /** What a request made with the given options is settled on. */
-  private[iris] def settings(options: CompletionOptions): Settings = Settings(
-    model = options.model.getOrElse(model),
-    maxTokens = options.maxTokens.getOrElse(maxTokens),
-  )
+  /** The provider whose API to use: the one serving [[model]]. */
+  def provider: LlmProvider = model.provider
+
+  private[iris] def limit(options: ReplyOptions): Int = options
+    .maxTokens
+    .getOrElse(maxTokens)
 
   /** The API origin to send to: [[baseUrl]] when set, else the provider's. */
   def origin: String = baseUrl.getOrElse(provider.origin)
 
-  /** Describes this configuration without its [[apiKey]], so it is safe to log. */
   override def toString: String =
-    s"LlmConfig($provider, <redacted>, $model, $maxTokens, $baseUrl, $timeout)"
+    s"LlmConfig(${ model.name }, <redacted>, $maxTokens, $baseUrl, $timeout)"
 
 object LlmConfig:
 
@@ -107,16 +111,16 @@ object LlmConfig:
   val apiKeyVariables: List[String] = LlmProvider
     .values
     .toList
-    .flatMap(keyNames)
+    .flatMap(keyVariables)
 
-  /** The completion token limit used when none is configured. */
+  /** The reply's token limit when neither the variable nor the host sets one. */
   val defaultMaxTokens: Int = 8192
 
-  /** How long to wait for a completion when no timeout is configured. */
+  /** How long to wait for a reply when no timeout is configured. */
   val defaultTimeout: FiniteDuration = 5.minutes
 
-  /** The optional configuration environment variables. */
-  val settingVariables: List[String] = List(
+  /** The optional environment variables read by [[fromEnv]]. */
+  val optionalVariables: List[String] = List(
     "LLM_PROVIDER",
     "LLM_MODEL",
     "LLM_MAX_TOKENS",
@@ -125,79 +129,98 @@ object LlmConfig:
   )
 
   /**
-    * Loads configuration from environment variables:
-    *   - `LLM_PROVIDER`: `anthropic`, `openai` or `gemini`. When absent, the
-    *     provider is inferred from whichever API key is set. When present but
-    *     unrecognised, no configuration is produced (rather than silently
-    *     routing requests to an unintended provider).
-    *   - `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` (or
-    *     `GOOGLE_API_KEY`): the provider API key.
-    *   - `LLM_MODEL`: overrides the provider's default model.
-    *   - `LLM_MAX_TOKENS`: the completion token limit (default
-    *     `defaultMaxTokens`). When present but not a positive whole number, no
-    *     configuration is produced.
-    *   - `LLM_BASE_URL`: overrides the provider's API origin.
-    *   - `LLM_TIMEOUT`: how long to wait for a completion, in seconds (default
-    *     `defaultTimeout`). When present but not a positive whole number, no
-    *     configuration is produced.
+    * Loads a configuration from environment variables:
+    *   - `LLM_PROVIDER`: `anthropic`, `openai` or `gemini`, else the provider
+    *     of `LLM_MODEL`, else inferred from whichever API key is set.
+    *   - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `GEMINI_API_KEY` (or
+    *     `GOOGLE_API_KEY`): the API key.
+    *   - `LLM_MODEL`: the model, as [[LlmModel.parse]] reads it, else the
+    *     provider's default.
+    *   - `LLM_MAX_TOKENS`: the reply's token limit, else `defaultMaxTokens`.
+    *   - `LLM_BASE_URL`: the API origin, else the provider's.
+    *   - `LLM_TIMEOUT`: the timeout in seconds, else [[defaultTimeout]].
+    *
+    * @param defaultMaxTokens
+    *   The reply's token limit when `LLM_MAX_TOKENS` is unset.
+    *
+    * @return
+    *   A configuration, or `None` when no API key is set, or when a set
+    *   variable is invalid: an unknown provider or model, a model the provider
+    *   does not serve, or a limit or timeout that is not a positive whole
+    *   number.
+    */
+  def fromEnv
+    (defaultMaxTokens: Int = LlmConfig.defaultMaxTokens)
+    : Option[LlmConfig] = from(env, defaultMaxTokens)
+
+  /**
+    * Loads configuration as [[fromEnv]] does, reading each variable through the
+    * given lookup instead of the environment, so that several configurations
+    * can be read from one environment under names of the caller's choosing.
+    *
+    * @param variable
+    *   The value of the variable of the given name, or `None` when it is unset.
+    *
+    * @param defaultMaxTokens
+    *   The reply's token limit when `LLM_MAX_TOKENS` is unset.
     *
     * @return
     *   A configuration, or `None` when no provider API key is set, or when a
     *   variable which is set cannot be used.
     */
-  def fromEnv: Option[LlmConfig] =
+  def from
+    (
+      variable: String => Option[String],
+      defaultMaxTokens: Int = LlmConfig.defaultMaxTokens,
+    )
+    : Option[LlmConfig] =
+    val named = variable("LLM_MODEL")
     for
-      provider  <- env("LLM_PROVIDER").fold(inferProvider)(LlmProvider.parse)
-      apiKey    <- apiKey(provider)
+      provider <- variable("LLM_PROVIDER").fold(
+        named.fold(inferProvider(variable))(LlmModel.parse(_).map(_.provider)),
+      )(LlmProvider.parse)
+      model <- named.fold(
+        Some(provider.defaultModel),
+      )(LlmModel.parse(_).filter(_.provider == provider))
+      apiKey    <- apiKey(variable, provider)
       maxTokens <-
-        env("LLM_MAX_TOKENS").fold(Some(defaultMaxTokens))(tokenLimit)
-      timeout <- env("LLM_TIMEOUT").fold(Some(defaultTimeout))(seconds)
+        variable("LLM_MAX_TOKENS").fold(Some(defaultMaxTokens))(positive)
+      timeout <- variable("LLM_TIMEOUT").fold(Some(defaultTimeout))(seconds)
     yield LlmConfig(
-      provider = provider,
+      model = model,
       apiKey = apiKey,
-      model = env("LLM_MODEL").getOrElse(provider.defaultModel),
       maxTokens = maxTokens,
-      baseUrl = env("LLM_BASE_URL"),
+      baseUrl = variable("LLM_BASE_URL"),
       timeout = timeout,
     )
 
-  /**
-    * Reads a timeout in seconds, which must be a positive whole number, on the
-    * same terms as [[tokenLimit]]: a value which is not is no timeout at all.
-    */
   private[iris] def seconds(value: String): Option[FiniteDuration] =
-    tokenLimit(value).map(_.seconds)
+    positive(value).map(_.seconds)
 
-  /**
-    * Reads a completion token limit, which must be a positive whole number. A
-    * value which is not is no limit at all, rather than a silent fall back to
-    * [[defaultMaxTokens]] which would hide the mistake.
-    */
-  private[iris] def tokenLimit(value: String): Option[Int] = value
+  /** Reads a positive whole number, or `None`, never a hidden default. */
+  private[iris] def positive(value: String): Option[Int] = value
     .trim
     .toIntOption
     .filter(_ > 0)
 
-  /** Infers the provider from whichever API key is present. */
-  private def inferProvider: Option[LlmProvider] = LlmProvider
+  private def inferProvider
+    (variable: String => Option[String])
+    : Option[LlmProvider] = LlmProvider
     .values
-    .find(apiKey(_).isDefined)
+    .find(apiKey(variable, _).isDefined)
 
-  /** The first configured API key for a provider, if any. */
-  private def apiKey(provider: LlmProvider): Option[String] = keyNames(provider)
-    .flatMap(env)
-    .headOption
+  private def apiKey
+    (
+      variable: String => Option[String],
+      provider: LlmProvider,
+    )
+    : Option[String] = keyVariables(provider).flatMap(variable).headOption
 
-  /** The environment variables that may hold a provider's API key. */
-  private def keyNames(provider: LlmProvider): List[String] = provider match
+  private def keyVariables(provider: LlmProvider): List[String] = provider match
     case LlmProvider.Anthropic => List("ANTHROPIC_API_KEY")
     case LlmProvider.OpenAi    => List("OPENAI_API_KEY")
     case LlmProvider.Gemini    => List("GEMINI_API_KEY", "GOOGLE_API_KEY")
 
-  /**
-    * Retrieves the value of an environment variable, if it exists and is
-    * non-empty.
-    */
   private def env(name: String): Option[String] = sys
     .env
     .get(name)

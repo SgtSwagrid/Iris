@@ -1,32 +1,32 @@
 package com.alecdorrington.iris
 
-import cats.MonadThrow
+import cats.{~>, MonadThrow}
 import cats.effect.{Async, Resource}
 import cats.syntax.traverse.*
 import sttp.client4.Backend
 import sttp.client4.httpclient.cats.HttpClientCatsBackend
 
 /**
-  * A provider-agnostic client for large language models. An adapter exists for
-  * each supported [[LlmProvider]]; use [[LlmClient.resource]] or
-  * [[LlmClient.fromEnv]] to construct one.
+  * A provider-agnostic client for large language models, constructed with
+  * [[LlmClient.resource]] or [[LlmClient.fromEnv]].
   *
-  * Clients are stateless: providers are given no session identity, and nothing
-  * is remembered between calls. Conversation history instead travels with each
-  * [[Chat]], so continuing a conversation means appending to the chat and
-  * sending the whole thing again.
+  * Clients are stateless: the whole conversation travels with each [[Chat]], so
+  * a conversation continues by appending to the chat and sending it again.
+  *
+  * @tparam F
+  *   The effect type.
   */
 trait LlmClient[F[_]]:
 
   /**
-    * Sends a chat to the model and returns its next reply.
+    * Sends a chat to the model for its next reply.
     *
     * @param chat
-    *   The full conversation so far, including any system message.
+    *   The conversation so far, including any system message.
     *
     * @param options
-    *   Optional per-request tuning; unset fields fall back to configured or
-    *   provider defaults.
+    *   The per-request options; unset fields fall back to the configuration or
+    *   the provider's defaults.
     *
     * @return
     *   An effect producing the model's reply.
@@ -34,24 +34,46 @@ trait LlmClient[F[_]]:
   def send
     (
       chat: Chat,
-      options: CompletionOptions = CompletionOptions(),
+      options: ReplyOptions = ReplyOptions(),
     )
-    : F[Completion]
+    : F[Reply]
 
   /**
-    * Counts the tokens this chat would cost to send, as the provider counts
-    * them, so that a host may check a conversation against a budget or a
-    * context window before spending a completion on finding out.
+    * Sends a single-turn prompt to the model.
     *
-    * Not every provider offers this: OpenAI has no such endpoint, and fails
-    * with [[LlmError.Unsupported]] rather than guessing with a tokeniser of its
-    * own, which would be a different number confidently presented.
+    * @param prompt
+    *   The prompt to send.
+    *
+    * @return
+    *   An effect producing the model's reply.
+    */
+  final def send(prompt: Prompt): F[Reply] = send(prompt.toChat)
+
+  /**
+    * Sends a single-turn prompt to the model with options.
+    *
+    * @param prompt
+    *   The prompt to send.
+    *
+    * @param options
+    *   The per-request options.
+    *
+    * @return
+    *   An effect producing the model's reply.
+    */
+  final def send(prompt: Prompt, options: ReplyOptions): F[Reply] =
+    send(prompt.toChat, options)
+
+  /**
+    * Counts the input tokens a chat would cost, as the provider counts them.
+    * Fails with [[LlmError.Unsupported]] where the provider cannot count
+    * (OpenAI).
     *
     * @param chat
     *   The conversation to count, including any system message.
     *
     * @param options
-    *   Optional per-request tuning; only the model is of any consequence.
+    *   The options the chat would be sent with, which no count depends on.
     *
     * @return
     *   An effect producing the number of input tokens.
@@ -59,33 +81,34 @@ trait LlmClient[F[_]]:
   def count
     (
       chat: Chat,
-      options: CompletionOptions = CompletionOptions(),
+      options: ReplyOptions = ReplyOptions(),
     )
     : F[Int]
 
-  /** Counts the tokens a single-turn prompt would cost to send. */
+  /**
+    * Counts the input tokens a single-turn prompt would cost.
+    *
+    * @param prompt
+    *   The prompt to count.
+    *
+    * @return
+    *   An effect producing the number of input tokens.
+    */
   final def count(prompt: Prompt): F[Int] = count(prompt.toChat)
-
-  /** Sends a single-turn prompt to the model and returns its completion. */
-  final def complete
-    (
-      prompt: Prompt,
-      options: CompletionOptions = CompletionOptions(),
-    )
-    : F[Completion] = send(prompt.toChat, options)
 
   /**
     * Writes the [[Chat.cacheable]] prefix of a chat into the provider's cache,
-    * asking for as little reply as the provider allows, so that requests
-    * sharing that prefix which are then sent at once all read it. Sent at once
-    * unwarmed, none of them could read what the others were still writing, and
-    * each would pay to write its own.
+    * with as short a reply as the provider allows. Requests sharing the prefix
+    * and sent at once afterwards then all read it, where unwarmed each would
+    * write its own. Fails with [[LlmError.Unsendable]] when the chat has no
+    * [[Part.CacheBreakpoint]].
     *
-    * Worth it only before several requests: one request writes the prefix just
-    * as well by itself. A chat with no [[Part.CacheBreakpoint]] has no prefix
-    * to warm, so it is refused as [[LlmError.Unsendable]]. The model, tools and
-    * every other option must be those the requests will be sent with, since a
-    * cache is kept per model.
+    * @param chat
+    *   The chat whose prefix to cache.
+    *
+    * @param options
+    *   The options the requests will be sent with, through a client of the same
+    *   model, as a cache is kept per model.
     *
     * @return
     *   An effect producing the provider's empty reply, whose usage says how
@@ -94,31 +117,111 @@ trait LlmClient[F[_]]:
   def warm
     (
       chat: Chat,
-      options: CompletionOptions = CompletionOptions(),
+      options: ReplyOptions = ReplyOptions(),
     )
-    : F[Completion] = send(
+    : F[Reply] = send(
     chat.cacheable,
     options.copy(maxTokens = Some(1)),
   )
 
+  /**
+    * Runs every request of this client, [[warm]] included, through a
+    * transformation, such as a limit on requests in flight.
+    *
+    * @tparam G
+    *   The effect the transformed client runs in.
+    *
+    * @param transform
+    *   The transformation applied to each request.
+    *
+    * @return
+    *   A client sending through this one.
+    */
+  final def mapK[G[_]](transform: F ~> G): LlmClient[G] =
+    val client = this
+    new LlmClient[G]:
+      override def send(chat: Chat, options: ReplyOptions): G[Reply] =
+        transform(client.send(chat, options))
+
+      override def count(chat: Chat, options: ReplyOptions): G[Int] =
+        transform(client.count(chat, options))
+
+      override def warm(chat: Chat, options: ReplyOptions): G[Reply] =
+        transform(client.warm(chat, options))
+
 object LlmClient:
 
-  /** Creates a client for the given configuration over an existing backend. */
+  /**
+    * A client passing every request on to another, for a wrapper to override
+    * only what it changes. It passes [[LlmClient.warm]] on too, which the
+    * default would send through [[LlmClient.send]] instead.
+    *
+    * @tparam F
+    *   The effect type.
+    *
+    * @param underlying
+    *   The client requests are passed on to.
+    */
+  abstract class Forwarding[F[_]]
+    (protected val underlying: LlmClient[F])
+    extends LlmClient[F]:
+
+    override def send(chat: Chat, options: ReplyOptions): F[Reply] = underlying
+      .send(chat, options)
+
+    override def count(chat: Chat, options: ReplyOptions): F[Int] = underlying
+      .count(chat, options)
+
+    override def warm(chat: Chat, options: ReplyOptions): F[Reply] = underlying
+      .warm(chat, options)
+
+  /**
+    * Creates a client over an existing backend.
+    *
+    * @tparam F
+    *   The effect type.
+    *
+    * @param config
+    *   The model, key and defaults to use.
+    *
+    * @param backend
+    *   The backend to send requests through.
+    *
+    * @return
+    *   A client for the configured provider.
+    */
   def apply[F[_] : MonadThrow]
     (config: LlmConfig, backend: Backend[F])
-    : LlmClient[F] = config.provider match
-    case LlmProvider.Anthropic => AnthropicClient(config, backend)
-    case LlmProvider.OpenAi    => OpenAiClient(config, backend)
-    case LlmProvider.Gemini    => GeminiClient(config, backend)
+    : LlmClient[F] = JsonClient(
+    ProviderApi.of(config.provider),
+    config,
+    backend,
+  )
 
-  /** Creates a client for the given configuration, with its own HTTP backend. */
+  /**
+    * Creates a client with an HTTP backend of its own.
+    *
+    * @tparam F
+    *   The effect type.
+    *
+    * @param config
+    *   The model, key and defaults to use.
+    *
+    * @return
+    *   A resource holding the client and its backend.
+    */
   def resource[F[_] : Async](config: LlmConfig): Resource[F, LlmClient[F]] =
     HttpClientCatsBackend.resource[F]().map(apply(config, _))
 
   /**
-    * Creates a client configured from the environment, as specified by
-    * [[LlmConfig.fromEnv]], or `None` when no provider is configured.
+    * Creates a client configured from the environment by [[LlmConfig.fromEnv]].
+    *
+    * @tparam F
+    *   The effect type.
+    *
+    * @return
+    *   A resource holding the client, or `None` when no provider is configured.
     */
   def fromEnv[F[_] : Async]: Resource[F, Option[LlmClient[F]]] = LlmConfig
-    .fromEnv
+    .fromEnv()
     .traverse(resource[F](_))
