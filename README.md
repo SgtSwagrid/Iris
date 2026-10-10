@@ -4,9 +4,9 @@
   <p>A provider-agnostic <a href="https://www.scala-lang.org/">Scala</a> client for large language models.</p>
 
   <span>
-    <a href="https://github.com/SgtSwagrid/Iris/actions/workflows/build-integrity.yml"><img src="https://github.com/SgtSwagrid/Iris/actions/workflows/build-integrity.yml/badge.svg" alt="Build status" /></a>
+    <a href="https://github.com/SgtSwagrid/iris/actions/workflows/build-integrity.yml"><img src="https://github.com/SgtSwagrid/iris/actions/workflows/build-integrity.yml/badge.svg" alt="Build status" /></a>
     <a href="https://search.maven.org/artifact/com.alecdorrington/iris_3"><img src="https://img.shields.io/maven-central/v/com.alecdorrington/iris_3.svg" alt="Maven Central" /></a>
-    <a href="https://alecdorrington.com/Iris"><img src="https://img.shields.io/badge/docs-latest-blue.svg" alt="Documentation" /></a>
+    <a href="https://alecdorrington.com/iris"><img src="https://img.shields.io/badge/docs-latest-blue.svg" alt="Documentation" /></a>
   </span>
 
 </div>
@@ -272,13 +272,6 @@ To read several configurations from one environment, as one per kind of request,
 val fast = LlmConfig.from(name => sys.env.get(s"${name}_FAST").orElse(sys.env.get(name)))
 ```
 
-To read several configurations from one environment, as one per kind of request, pass
-`LlmConfig.from` a lookup of your own, which it reads every variable above through:
-
-```scala
-val fast = LlmConfig.from(name => sys.env.get(s"${name}_FAST").orElse(sys.env.get(name)))
-```
-
 A host whose replies run longer than most passes its own default for an unset `LLM_MAX_TOKENS`,
 as in `LlmConfig.fromEnv(defaultMaxTokens = 16_000)` or `LlmConfig.from(lookup, 16_000)`.
 
@@ -290,8 +283,8 @@ Issues are very welcome; for anything more, please open an issue first.
 
 ## 👁️ See also
 
-- [Hecate](https://github.com/SgtSwagrid/Hecate), a sibling, for user accounts, sessions, groups and permissions.
-- [Eunomia](https://github.com/SgtSwagrid/Eunomia), a sibling, for filtering, ordering and paging lists.
-- [Dike](https://github.com/SgtSwagrid/Dike), a sibling, for ranking by pairwise comparison, with a model as the judge.
+- [Hecate](https://github.com/SgtSwagrid/hecate), a sibling, for user accounts, sessions, groups and permissions.
+- [Eunomia](https://github.com/SgtSwagrid/eunomia), a sibling, for filtering, ordering and paging lists.
+- [Dike](https://github.com/SgtSwagrid/dike), a sibling, for ranking by pairwise comparison, with a model as the judge.
 - [qr4s](https://github.com/SgtSwagrid/qr4s), a sibling, for generating QR codes, on the JVM and in the browser.
 - This library was made using [Scala Library Template](https://github.com/SgtSwagrid/scala-library-template).
