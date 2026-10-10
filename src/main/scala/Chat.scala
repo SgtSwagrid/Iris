@@ -5,91 +5,91 @@ import io.circe.Json
 /** The author of a [[Message]] in a [[Chat]]. */
 enum Role:
 
-  /** The person (or application) conversing with the model. */
+  /** The person or application conversing with the model. */
   case User
 
   /** The model itself. */
   case Assistant
 
-  /** The name a role is sent under, where a provider uses this one. */
-  def wire: String = this match
+  /** The role's name on the wire, where a provider uses this one. */
+  def code: String = this match
     case User      => "user"
     case Assistant => "assistant"
 
 /**
-  * One part of a message. A message is a list of these, so that text and the
-  * media it refers to may travel together in the order they are meant to be
-  * read.
-  *
-  * A sealed trait rather than an `enum`, so that each case is a type of its
-  * own: [[Chat.results]] and [[Completion.toolCalls]] speak of one particular
-  * kind of part, which an enum's cases would widen away.
+  * A part of a message. A message is a list of parts, so that text and media
+  * travel together in reading order.
   */
 sealed trait Part
 
 object Part:
 
-  /** Written text. */
+  /**
+    * A part of written text.
+    *
+    * @param text
+    *   The text.
+    */
   final case class Text(text: String) extends Part
 
   /**
-    * A picture, a document, or anything else a model may be given to look at.
+    * A picture, document or other media for the model to look at.
     *
     * @param mediaType
-    *   The IANA media type of the data, e.g. `image/png`.
+    *   The IANA media type of the data, such as `image/png`.
     *
     * @param data
-    *   The content itself, Base64 encoded.
+    *   The content, Base64 encoded.
     */
   final case class Media(mediaType: String, data: String) extends Part
 
   /**
-    * The model asking for a tool to be run. Part of the model's own message,
-    * and sent back with the conversation so that the model can see what it
-    * asked for.
+    * A call by the model for a tool to be run. It is part of the model's
+    * message, and is sent back with the conversation.
     *
     * @param id
-    *   What the provider calls this request, by which its result is matched to
-    *   it. Gemini names no such thing, so its tool's name stands in.
+    *   The provider's identifier of the call, by which its result is matched.
+    *   Gemini has none, so the tool's name stands in.
     *
-    * @param name
+    * @param tool
     *   The name of the [[Tool]] to run.
     *
     * @param arguments
-    *   The arguments to run it with, as described by [[Tool.parameters]].
+    *   The arguments, as described by [[Tool.parameters]].
     */
-  final case class ToolRequest(id: String, name: String, arguments: Json)
+  final case class ToolCall(id: String, tool: String, arguments: Json)
     extends Part
 
   /**
-    * What running a tool produced, answering a [[ToolRequest]]. Part of the
-    * user's next message, since it is the host which speaks here.
+    * The output of a tool, answering a [[ToolCall]] in the user's next message.
     *
-    * @param id
-    *   The [[ToolRequest.id]] this answers.
+    * @param callId
+    *   The [[ToolCall.id]] this answers.
     *
-    * @param name
-    *   The name of the tool which was run, which Gemini matches on.
+    * @param tool
+    *   The name of the tool run, which Gemini matches by.
     *
-    * @param content
-    *   What the tool produced, for the model to read.
+    * @param output
+    *   The tool's output, for the model to read.
     */
-  final case class ToolResult(id: String, name: String, content: String)
+  final case class ToolResult
+    (
+      callId: String,
+      tool: String,
+      output: String,
+    )
     extends Part
 
   /**
-    * The end of a prefix worth caching: everything before this point, the
-    * system message included, is sent alike by many requests, so the provider
-    * may keep what it made of it rather than read it afresh each time. It says
-    * nothing to the model itself.
+    * The end of a prefix for the provider to cache: everything before it, the
+    * system message included, is shared by many requests. It says nothing to
+    * the model.
     *
-    * Anthropic caches only what it is told to, and is told by this: the block
-    * just before it is marked, at most four times in one chat. OpenAI and
-    * Gemini cache every long prefix of their own accord, and are sent nothing.
-    * A prefix too short for the provider to cache is simply not cached.
-    *
-    * Requests sent at once cannot read what none of them has yet written, so
-    * [[LlmClient.warm]] writes the prefix before a batch of them is sent.
+    * Anthropic caches only at breakpoints, and refuses a chat whose breakpoints
+    * mark more than four blocks with [[LlmError.Unsendable]]; OpenAI and Gemini
+    * cache long prefixes by themselves. A prefix too short for the provider is
+    * not cached. Requests sent at once cannot read one another's writes, so
+    * call [[LlmClient.warm]] before a batch.
     */
   case object CacheBreakpoint extends Part
 
@@ -97,51 +97,51 @@ object Part:
   * A single message in a [[Chat]].
   *
   * @param role
-  *   The author of this message.
+  *   The author of the message.
   *
   * @param content
-  *   What this message is made of, in the order it is to be read.
+  *   The parts of the message, in reading order.
   */
 final case class Message(role: Role, content: List[Part]):
 
-  /** The written text of this message, with any media left out. */
+  /** The text of this message, with any media left out. */
   def text: String = content
     .collect:
       case Part.Text(text) => text
     .mkString
 
-  /**
-    * Whether this message is nothing but text, with no breakpoint in it either,
-    * which some providers must be sent apart from the text.
-    */
-  def isText: Boolean = content.forall(_.isInstanceOf[Part.Text])
-
-  /** This message with any cache breakpoints left out. */
+  /** This message without its cache breakpoints. */
   def uncached: Message =
     copy(content = content.filterNot(_ == Part.CacheBreakpoint))
 
-  /**
-    * Whether this message holds nothing but cache breakpoints, which say
-    * nothing to the model, and so is no message a provider will take.
-    */
-  private[iris] def saysNothing: Boolean =
-    content.forall(_ == Part.CacheBreakpoint)
+  /** Whether this message holds only breakpoints, which no provider accepts. */
+  private[iris] def silent: Boolean = content.forall(_ == Part.CacheBreakpoint)
 
-  /** The results this message carries, which some providers send apart. */
+  /** The tool results this message carries. */
   def toolResults: List[Part.ToolResult] = content.collect:
     case result: Part.ToolResult => result
 
 object Message:
 
-  /** A message of text alone. */
+  /**
+    * Creates a message of text alone.
+    *
+    * @param role
+    *   The author of the message.
+    *
+    * @param text
+    *   The text.
+    *
+    * @return
+    *   A message of one text part.
+    */
   def apply(role: Role, text: String): Message =
     Message(role, List(Part.Text(text)))
 
 /**
-  * The full history of a conversation with a model. Clients are stateless:
-  * nothing is remembered between calls, so the entire history is supplied with
-  * every request. To continue a conversation, append the model's reply and the
-  * next user message, then send the chat again:
+  * The full history of a conversation with a model, sent whole with every
+  * request. To continue a conversation, append the model's reply and the next
+  * user message, then send the chat again:
   *
   * {{{
   * for
@@ -151,19 +151,16 @@ object Message:
   * yield second
   * }}}
   *
-  * A chat is sent to be continued, so it should hold at least one message and
-  * end with the user's, as it does when built up through [[user]] and
-  * [[assistant]] in turn. A chat which ends with the assistant's own message
-  * asks the model to continue its own reply, which the newer Anthropic models
-  * refuse; an empty one asks nothing of anybody, which every provider refuses.
-  * Neither is rejected by the type, so both are reported as
-  * [[LlmError.Unsendable]] rather than spending a request to be told.
+  * A chat should end with the user's message: one ending with the assistant's
+  * asks the model to continue its own reply. An empty chat, a message of
+  * breakpoints alone, or a reply that a newer Anthropic model would have to
+  * continue fails with [[LlmError.Unsendable]] before any request is made.
   *
   * @param messages
-  *   Every message exchanged so far, oldest first.
+  *   The messages exchanged so far, oldest first.
   *
   * @param system
-  *   An optional system message, establishing general model behaviour.
+  *   The system message, if any, setting the model's general behaviour.
   */
 final case class Chat
   (
@@ -171,46 +168,93 @@ final case class Chat
     system: Option[String] = None,
   ):
 
-  /** This chat with the given message appended. */
-  def add(message: Message): Chat = copy(messages = messages :+ message)
-
-  /** This chat with a user message appended. */
-  def user(content: String): Chat = add(Message(Role.User, content))
-
-  /** This chat with a user message of the given parts appended. */
-  def user(content: Part*): Chat = add(Message(Role.User, content.toList))
-
-  /** This chat with an assistant message of the given parts appended. */
-  def assistant(content: Part*): Chat =
-    add(Message(Role.Assistant, content.toList))
-
-  /** This chat with the model's reply, tool requests and all, appended. */
-  def reply(completion: Completion): Chat = add(Message(
-    Role.Assistant,
-    Part.Text(completion.text) +: completion.toolCalls,
-  ))
-
-  /** This chat with the results of the model's tool requests appended. */
-  def results(results: Part.ToolResult*): Chat =
-    add(Message(Role.User, results.toList))
-
-  /** This chat with an assistant message appended. */
-  def assistant(content: String): Chat = add(Message(Role.Assistant, content))
-
-  /** This chat with the given system message. */
-  def withSystem(instructions: String): Chat = copy(system = Some(instructions))
+  /**
+    * Appends a message.
+    *
+    * @param message
+    *   The message to append.
+    *
+    * @return
+    *   A copy of this chat ending with the message.
+    */
+  def appended(message: Message): Chat = copy(messages = messages :+ message)
 
   /**
-    * The part of this chat worth caching: everything up to its last
-    * [[Part.CacheBreakpoint]], which is kept, so that the prefix is sent just
-    * as the whole chat sends it. Nothing but the system message when no message
-    * holds a breakpoint, which is no chat to send.
+    * Appends a user message of text.
     *
-    * It is a chat to send, and a provider answers only one which ends with the
-    * user saying something. So where the prefix does not, as when its last
-    * breakpoint opens a message, to cache only what came before, or closes one
-    * of the assistant's, it is followed by the least a user can say, which is
-    * no part of the prefix.
+    * @param text
+    *   The text of the message.
+    *
+    * @return
+    *   A copy of this chat ending with the message.
+    */
+  def user(text: String): Chat = appended(Message(Role.User, text))
+
+  /**
+    * Appends a user message of several parts, such as the results of the tools
+    * the model called.
+    *
+    * @param content
+    *   The parts of the message, in reading order.
+    *
+    * @return
+    *   A copy of this chat ending with the message.
+    */
+  def user(content: Part*): Chat = appended(Message(Role.User, content.toList))
+
+  /**
+    * Appends an assistant message of several parts.
+    *
+    * @param content
+    *   The parts of the message, in reading order.
+    *
+    * @return
+    *   A copy of this chat ending with the message.
+    */
+  def assistant(content: Part*): Chat =
+    appended(Message(Role.Assistant, content.toList))
+
+  /**
+    * Appends the model's reply, tool calls included.
+    *
+    * @param reply
+    *   The reply to append.
+    *
+    * @return
+    *   A copy of this chat ending with the reply.
+    */
+  def assistant(reply: Reply): Chat = appended(Message(
+    Role.Assistant,
+    Part.Text(reply.text) +: reply.toolCalls,
+  ))
+
+  /**
+    * Appends an assistant message of text.
+    *
+    * @param text
+    *   The text of the message.
+    *
+    * @return
+    *   A copy of this chat ending with the message.
+    */
+  def assistant(text: String): Chat = appended(Message(Role.Assistant, text))
+
+  /**
+    * Sets the system message.
+    *
+    * @param system
+    *   The system message.
+    *
+    * @return
+    *   A copy of this chat with the system message.
+    */
+  def withSystem(system: String): Chat = copy(system = Some(system))
+
+  /**
+    * The prefix of this chat to cache: everything up to and including its last
+    * [[Part.CacheBreakpoint]], followed where needed by a minimal user message
+    * so that it can be sent. Without a breakpoint, it holds no messages and so
+    * cannot be sent.
     */
   def cacheable: Chat =
     val last = messages.lastIndexWhere(_.content.contains(Part.CacheBreakpoint))
@@ -228,14 +272,12 @@ final case class Chat
     )
 
   /**
-    * The given messages, ending with the user saying something. Breakpoints
-    * which a last message holds alone mark the end of what came before it, so
-    * go there instead: onto the message before it where that is the user's, and
-    * otherwise into a message of the user's saying the least possible, which
-    * follows messages ending with the assistant's as well.
+    * Ends the messages with the user's. Breakpoints that a last message holds
+    * alone move onto the user's message before it, or else into a minimal user
+    * message.
     */
   private def asked(prefix: List[Message]): List[Message] =
-    val (said, breakpoints) = prefix.lastOption.filter(_.saysNothing) match
+    val (said, breakpoints) = prefix.lastOption.filter(_.silent) match
       case Some(empty) => (prefix.init, empty.content)
       case None        => (prefix, List.empty)
     said.lastOption.filter(_.role == Role.User) match

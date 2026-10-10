@@ -31,7 +31,7 @@ Add the following to your `build.sbt`:
 libraryDependencies += "com.alecdorrington" %% "iris" % "0.1.0"
 ```
 
-Compiled with Scala `3.8.4`, with no intention to explicitly support older versions. JVM only.
+Compiled with Scala `3.9.0`, with no intention to explicitly support older versions. JVM only.
 
 ## 🚀 Usage
 
@@ -40,13 +40,30 @@ Build one for an explicit [`LlmConfig`](src/main/scala/LlmConfig.scala) with `Ll
 over an sttp backend of your own with `LlmClient(config, backend)`,
 or from the environment (see [Configuration](#%EF%B8%8F-configuration)) with `LlmClient.fromEnv`.
 
+Models are named by [`LlmModel`](src/main/scala/LlmModel.scala), each served by one provider,
+which is the one a configuration speaks to:
+
+```scala
+import com.alecdorrington.iris.{LlmClient, LlmConfig, LlmModel}
+
+LlmClient.resource[IO](LlmConfig(LlmModel.ClaudeOpus5_5, apiKey, maxTokens = 4096))
+```
+
+A client prompts its configuration's model alone. For another model, build another client; several
+may share one backend through `LlmClient(config, backend)`.
+
+A model Iris does not list yet is named with its provider, as
+`LlmModel.of(LlmProvider.Anthropic, "claude-...")`, which gives `None` for a blank name, and the
+listed constant for a name Iris lists. A model's `name` is its provider's and its own, as
+`anthropic:claude-opus-5-5`, which is how a configuration logs it.
+
 ### Single-turn prompts
 
 ```scala
 import com.alecdorrington.iris.{LlmClient, Prompt}
 
 LlmClient.fromEnv[IO].use {
-  case Some(client) => client.complete(Prompt("Hello!"))
+  case Some(client) => client.send(Prompt("Hello!"))
   case None         => // No provider configured.
 }
 ```
@@ -69,20 +86,31 @@ yield second.text
 
 ### Tuning and metadata
 
-Each request accepts [`CompletionOptions`](src/main/scala/CompletionOptions.scala)
-(model override, token limit, temperature, top-p, stop sequences), and each
-[`Completion`](src/main/scala/Completion.scala) carries the reply text along with a
+Each request accepts [`ReplyOptions`](src/main/scala/ReplyOptions.scala)
+(token limit, temperature, top-p, stop sequences, effort), and each
+[`Reply`](src/main/scala/Reply.scala) carries the reply text along with a
 normalised `StopReason` and token usage counts.
 
 ```scala
-client.send(chat, CompletionOptions(maxTokens = Some(1024), stopSequences = List("\n\n")))
+client.send(chat, ReplyOptions(maxTokens = Some(1024), stopSequences = List("\n\n")))
 ```
 
 > [!NOTE]
-> Anthropic's newer models, the default `claude-sonnet-5` among them, no longer accept sampling
+> Anthropic's newer models, the default `ClaudeSonnet5_5` among them, no longer accept sampling
 > parameters and reject a request which carries them. Iris omits `temperature` and top-p for those
-> models rather than let the request fail; both still apply to every other provider, and to
-> Anthropic's older models.
+> models, and for any Anthropic model it does not list, rather than let the request fail; both
+> still apply to every other provider, and to Anthropic's older models.
+
+A model that thinks before it answers can be told how much to think with an
+[`Effort`](src/main/scala/Effort.scala), from `Low` to `Max`. Less thought is quicker and
+cheaper, and leaves more of the token limit for the answer, where a hard request can
+otherwise be thought about until none is left. It is sent as Anthropic's `effort`,
+OpenAI's `reasoning_effort` and a Gemini thinking budget; a model that cannot be told
+refuses the request.
+
+```scala
+client.send(chat, ReplyOptions(effort = Some(Effort.Medium)))
+```
 
 ### Pictures and documents
 
@@ -102,18 +130,17 @@ dropped or sent as something it is not.
 
 ### Streaming
 
-Where a reader is waiting, [`LlmStream`](src/main/scala/LlmStream.scala) delivers the reply
+Where a reader is waiting, [`LlmStreamer`](src/main/scala/LlmStreamer.scala) delivers the reply
 as it is written. It is a capability apart from `LlmClient`, because it needs a backend which
 can stream.
 
 ```scala
-import com.alecdorrington.iris.{Delta, LlmStream}
+import com.alecdorrington.iris.{Delta, LlmStreamer}
 
-LlmStream.fromEnv[IO].use {
+LlmStreamer.fromEnv[IO].use {
   case Some(llm) => llm.stream(Prompt("Tell me a story.")).evalMap {
-    case Delta.Text(text)          => IO.print(text)
-    case Delta.End(reason, usage)  => IO.println(s"
-($reason)")
+    case Delta.Text(text)      => IO.print(text)
+    case Delta.End(reason, _)  => IO.println(s"\n($reason)")
   }.compile.drain
   case None => IO.unit
 }
@@ -126,7 +153,7 @@ have both halves together.
 
 ### Tools
 
-Offer the model tools it may ask to have run, and it will say so in `Completion.toolCalls`.
+Offer the model tools it may ask to have run, and it will say so in `Reply.toolCalls`.
 Iris never runs a tool itself; what one does, and whether it is allowed to, is yours to decide.
 
 ```scala
@@ -135,20 +162,20 @@ import com.alecdorrington.iris.{Part, Tool}
 val weather = Tool("weather", "Looks up the weather.", schema)
 
 for
-  asked  <- client.send(chat, CompletionOptions(tools = List(weather)))
+  asked  <- client.send(chat, ReplyOptions(tools = List(weather)))
   result  = Part.ToolResult(asked.toolCalls.head.id, "weather", lookUp(asked.toolCalls.head))
-  answer <- client.send(chat.reply(asked).results(result))
+  answer <- client.send(chat.assistant(asked).user(result))
 yield answer.text
 ```
 
-A reply which asked for a tool has `StopReason.ToolUse`, on every provider, and so does a
+A reply which asked for a tool has `StopReason.ToolCall`, on every provider, and so does a
 streamed reply's `Delta.End` — Gemini reports no such reason of its own, so the asking is what
 says so.
 
 ### Counting tokens
 
 `count` asks the provider what a chat would cost to send, so a conversation can be
-checked against a budget or a context window before a completion is spent finding out.
+checked against a budget or a context window before a reply is spent finding out.
 
 ```scala
 client.count(Prompt("How long is a piece of string?"))
@@ -189,9 +216,31 @@ Each provider keeps a cache per model, and caches nothing shorter than its own m
 ### Errors
 
 A provider's refusal fails the effect with an [`LlmError`](src/main/scala/LlmError.scala):
-`Http` for an unsuccessful response, carrying its status and body, and `Malformed` for a response
+`Unsuccessful` for an unsuccessful response, carrying its status and body, and `Malformed` for a response
 that could not be understood. Response bodies may contain provider detail you would rather not show
 to your own users, so consider logging them rather than passing them on.
+
+### Wrapping a client
+
+Iris does no throttling, retrying or logging of its own, so that each host can wrap a client in
+exactly the policy it wants. `mapK` runs every request through one transformation, as a limit on
+requests in flight does:
+
+```scala
+Semaphore[IO](16).map(permits => client.mapK(permits.permit.surroundK))
+```
+
+A wrapper that treats requests differently extends `LlmClient.Forwarding`, which passes every
+request on, and overrides only what it changes:
+
+```scala
+def logged(client: LlmClient[IO]): LlmClient[IO] = new LlmClient.Forwarding(client):
+  override def send(chat: Chat, options: ReplyOptions): IO[Reply] =
+    client.send(chat, options).flatTap(reply => IO.println(reply.usage))
+```
+
+Both pass `warm` on to the client they wrap, as a wrapper must: the default `warm` sends through
+`send`, which would lose however the provider itself warms.
 
 ## ⚙️ Configuration
 
@@ -199,19 +248,39 @@ to your own users, so consider logging them rather than passing them on.
 
 | Variable            | Meaning                                     | Default                        |
 |---------------------|---------------------------------------------|--------------------------------|
-| `LLM_PROVIDER`      | `anthropic`, `openai` or `gemini`           | Inferred from which key exists |
+| `LLM_PROVIDER`      | `anthropic`, `openai` or `gemini`           | `LLM_MODEL`'s, else by key    |
 | `ANTHROPIC_API_KEY` | API key for Anthropic                       | -                              |
 | `OPENAI_API_KEY`    | API key for OpenAI                          | -                              |
 | `GEMINI_API_KEY`    | API key for Gemini (or `GOOGLE_API_KEY`)    | -                              |
-| `LLM_MODEL`         | Model name to use                           | Provider-specific default      |
-| `LLM_MAX_TOKENS`    | Maximum number of tokens in each completion | `8192`                         |
+| `LLM_MODEL`         | Model to use, by its API name (see below)   | Provider-specific default      |
+| `LLM_MAX_TOKENS`    | Maximum number of tokens in each reply      | `8192`, or the host's default  |
 | `LLM_BASE_URL`      | Overrides the provider's API origin         | The provider's own origin      |
-| `LLM_TIMEOUT`       | Seconds to wait for a completion            | `300`                          |
+| `LLM_TIMEOUT`       | Seconds to wait for a reply                 | `300`                          |
 
 With no key set, `fromEnv` yields `None`. So does a variable which is set but cannot be used:
-an unrecognised `LLM_PROVIDER`, rather than falling back to whichever key exists, and an
-`LLM_MAX_TOKENS` which is not a positive whole number, rather than quietly reverting to the
-default and hiding the mistake.
+an unrecognised `LLM_PROVIDER`, rather than falling back to whichever key exists, an `LLM_MODEL`
+that names no model Iris lists or one which another provider serves, and an `LLM_MAX_TOKENS`
+which is not a positive whole number, rather than quietly reverting to the default and hiding the
+mistake. A model Iris does not list is named after its provider and a colon, as
+`LLM_MODEL=anthropic:claude-...`, so that a mistyped name is still caught. A Gemini model may
+also be written as Gemini's API lists it, as `gemini:models/gemini-...`.
+
+To read several configurations from one environment, as one per kind of request, pass
+`LlmConfig.from` a lookup of your own, which it reads every variable above through:
+
+```scala
+val fast = LlmConfig.from(name => sys.env.get(s"${name}_FAST").orElse(sys.env.get(name)))
+```
+
+To read several configurations from one environment, as one per kind of request, pass
+`LlmConfig.from` a lookup of your own, which it reads every variable above through:
+
+```scala
+val fast = LlmConfig.from(name => sys.env.get(s"${name}_FAST").orElse(sys.env.get(name)))
+```
+
+A host whose replies run longer than most passes its own default for an unset `LLM_MAX_TOKENS`,
+as in `LlmConfig.fromEnv(defaultMaxTokens = 16_000)` or `LlmConfig.from(lookup, 16_000)`.
 
 ## 🤝 Contributing
 

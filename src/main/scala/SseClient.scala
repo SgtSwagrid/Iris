@@ -2,82 +2,44 @@ package com.alecdorrington.iris
 
 import cats.effect.Async
 import fs2.Stream
-import io.circe.Json
-import scala.annotation.unused
 import sttp.capabilities.fs2.Fs2Streams
 import sttp.client4.*
-import sttp.model.Uri
 
-/** A request for a reply delivered as a stream of events. */
 private[iris] type SseRequest[F[_]] = StreamRequest[
   Either[String, Stream[F, Byte]],
   Fs2Streams[F],
 ]
 
-/**
-  * What every streaming adapter does alike: refuse a chat the provider would
-  * not answer, ask for the reply as a stream of events, and read the events for
-  * whatever they say about the reply so far.
-  *
-  * A subclass supplies only what its provider does differently.
-  */
-private[iris] abstract class SseClient[F[_] : Async]
+/** An [[LlmStreamer]] for any provider, as its [[ProviderApi]] says. */
+private[iris] final class SseClient[F[_] : Async]
   (
+    api: ProviderApi,
     config: LlmConfig,
     backend: StreamBackend[F, Fs2Streams[F]],
   )
-  extends LlmStream[F]:
+  extends LlmStreamer[F]:
 
-  /** The provider whose API this adapter speaks. */
-  protected def provider: LlmProvider
+  override def stream(chat: Chat, options: ReplyOptions): Stream[F, Delta] =
+    Stream
+      .eval(Async[F].fromEither(request(chat, options)))
+      .flatMap(sent)
+      .through(Sse.events)
+      .through(api.reply[F])
 
-  /** The URL which streams a reply to a request made with these options. */
-  protected def endpoint(options: CompletionOptions): Either[LlmError, Uri]
-
-  /** The body of a request asking for this chat to be answered in pieces. */
-  protected def body(chat: Chat, options: CompletionOptions): String
-
-  /** The given request, bearing this provider's credentials. */
-  protected def authenticated(request: SseRequest[F]): SseRequest[F]
-
-  /**
-    * The reply which a stream's events make up, read as they arrive. A provider
-    * each of whose events says what it says alone reads them with [[Sse.each]].
-    */
-  protected def reply(events: Stream[F, Json]): Stream[F, Delta]
-
-  /** Why this provider would refuse the chat, where it would. */
-  protected def acceptable
-    (
-      chat: Chat,
-      @unused
-      options: CompletionOptions,
-    )
-    : Either[LlmError, Unit] = JsonHttp.answerable(provider, chat)
-
-  override def stream
-    (chat: Chat, options: CompletionOptions)
-    : Stream[F, Delta] = Stream
-    .eval(Async[F].fromEither(request(chat, options)))
-    .flatMap(sent)
-    .through(Sse.events)
-    .through(reply)
-
-  /** The request which asks for the next reply, or why it cannot be made. */
   private def request
-    (chat: Chat, options: CompletionOptions)
+    (chat: Chat, options: ReplyOptions)
     : Either[LlmError, SseRequest[F]] =
     for
-      _   <- acceptable(chat, options)
-      url <- endpoint(options)
-    yield authenticated(
-      JsonHttp
-        .post(url, body(chat, options))
-        .readTimeout(config.timeout)
-        .response(asStreamUnsafe(Fs2Streams[F])),
-    )
+      _        <- api.acceptable(config, chat, options)
+      endpoint <- api.endpoint(config, options, true)
+    yield api
+      .post(
+        config,
+        endpoint,
+        api.body(config, chat, options, true),
+      )
+      .response(asStreamUnsafe(Fs2Streams[F]))
 
-  /** The bytes of a response, or its failure raised into the stream. */
   private def sent(request: SseRequest[F]): Stream[F, Byte] = Stream
     .eval(request.send(backend))
     .flatMap: response =>
@@ -86,7 +48,7 @@ private[iris] abstract class SseClient[F[_] : Async]
         .fold(
           error =>
             Stream.raiseError[F](
-              JsonHttp.unsuccessful(provider, response, error),
+              JsonHttp.unsuccessful(api.provider, response, error),
             ),
           identity,
         )

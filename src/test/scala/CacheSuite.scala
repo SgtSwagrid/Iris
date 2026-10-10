@@ -1,25 +1,21 @@
 package com.alecdorrington.iris
 
+import cats.~>
+import cats.arrow.FunctionK
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
-import com.alecdorrington.iris.Fixtures.{config, json}
+import com.alecdorrington.iris.Fixtures.{answer, config, json}
 import io.circe.Json
-import io.circe.parser.decode
 import munit.FunSuite
 import sttp.client4.StringBody
 import sttp.client4.impl.cats.CatsMonadAsyncError
 import sttp.client4.testing.{BackendStub, ResponseStub}
 import sttp.model.StatusCode
 
-/**
-  * Tests of caching a chat's prefix: where each provider is told of a
-  * breakpoint, what it reports of its cache, and warming one.
-  */
 class CacheSuite extends FunSuite:
 
-  private val options = CompletionOptions()
+  private val options = ReplyOptions()
 
-  /** A long document, shared by every request, then a question about it. */
   private val chat = Chat()
     .withSystem("Be brief.")
     .user(
@@ -28,7 +24,6 @@ class CacheSuite extends FunSuite:
       Part.Text("A question about it."),
     )
 
-  /** The content of the given message of a request body. */
   private def content(body: Json, message: Int): Json = body
     .hcursor
     .downField("messages")
@@ -49,7 +44,7 @@ class CacheSuite extends FunSuite:
     .deepMerge(Json.obj("cache_control" -> ephemeral))
 
   test("anthropic marks the block just before a breakpoint"):
-    val body = json(AnthropicClient.requestJson(config, chat, options))
+    val body = json(AnthropicApi.body(config, chat, options))
     assertEquals(
       content(body, 0),
       Json.arr(
@@ -63,7 +58,7 @@ class CacheSuite extends FunSuite:
     )
 
   test("a breakpoint opening the first message marks the system message"):
-    val body = json(AnthropicClient.requestJson(
+    val body = json(AnthropicApi.body(
       config,
       Chat()
         .withSystem("Be brief.")
@@ -77,7 +72,7 @@ class CacheSuite extends FunSuite:
     assertEquals(content(body, 0), Json.fromString("Hi"))
 
   test("a breakpoint opening a later message marks the one before it"):
-    val body = json(AnthropicClient.requestJson(
+    val body = json(AnthropicApi.body(
       config,
       Chat()
         .user("Hello")
@@ -98,7 +93,7 @@ class CacheSuite extends FunSuite:
     )
 
   test("a breakpoint with nothing at all before it marks nothing"):
-    val body = json(AnthropicClient.requestJson(
+    val body = json(AnthropicApi.body(
       config,
       Chat().user(Part.CacheBreakpoint, Part.Text("Hi")),
       options,
@@ -109,30 +104,30 @@ class CacheSuite extends FunSuite:
   test("anthropic refuses more breakpoints than it keeps"):
     val many = Chat().user(
       List
-        .fill(AnthropicClient.maxBreakpoints + 1)(
+        .fill(AnthropicApi.maxBreakpoints + 1)(
           List(Part.Text("x"), Part.CacheBreakpoint),
         )
         .flatten*,
     )
-    assert(AnthropicClient.breakable(many).isLeft)
-    assert(AnthropicClient.breakable(chat).isRight)
+    assert(AnthropicApi.markable(many).isLeft)
+    assert(AnthropicApi.markable(chat).isRight)
 
   test("anthropic counts the blocks breakpoints mark, not the breakpoints"):
     val breakpoints =
-      List.fill(AnthropicClient.maxBreakpoints + 1)(Part.CacheBreakpoint)
+      List.fill(AnthropicApi.maxBreakpoints + 1)(Part.CacheBreakpoint)
     val together = Chat().user(Part.Text("x") +: breakpoints*)
     val leading  = Chat().user(breakpoints :+ Part.Text("x")*)
-    assert(AnthropicClient.breakable(together).isRight)
-    assert(AnthropicClient.breakable(leading).isRight)
-    assert(AnthropicClient.breakable(leading.withSystem("Be brief.")).isRight)
+    assert(AnthropicApi.markable(together).isRight)
+    assert(AnthropicApi.markable(leading).isRight)
+    assert(AnthropicApi.markable(leading.withSystem("Be brief.")).isRight)
 
   test("openai and gemini are sent no breakpoints"):
-    val openAi = json(OpenAiClient.requestJson(config, chat, options))
+    val openAi = json(OpenAiApi.body(config, chat, options))
     assertEquals(
       content(openAi, 1),
       Json.fromString("A long document.A question about it."),
     )
-    val gemini = json(GeminiClient.requestJson(config, chat, options))
+    val gemini = json(GeminiApi.body(config, chat, options))
     assertEquals(
       gemini.hcursor.downField("contents").downN(0).downField("parts").focus,
       Some(Json.arr(
@@ -199,11 +194,11 @@ class CacheSuite extends FunSuite:
       assert(!prefix.messages.map(_.text).mkString.contains("How are you?"))
       assertEquals(
         content(
-          json(AnthropicClient.requestJson(config, prefix, options)),
+          json(AnthropicApi.body(config, prefix, options)),
           1,
         ),
         content(
-          json(AnthropicClient.requestJson(config, whole, options)),
+          json(AnthropicApi.body(config, whole, options)),
           1,
         ),
       )
@@ -231,11 +226,7 @@ class CacheSuite extends FunSuite:
                   "cache_creation_input_tokens":20,
                   "cache_read_input_tokens":30}}"""
     assertEquals(
-      decode[AnthropicClient.Response](body)
-        .toOption
-        .get
-        .completion
-        .map(_.usage),
+      answer(AnthropicApi, body).map(_.usage),
       Right(Some(Usage(60, 5, 30))),
     )
 
@@ -245,7 +236,7 @@ class CacheSuite extends FunSuite:
          "usage":{"prompt_tokens":40,"completion_tokens":2,
                   "prompt_tokens_details":{"cached_tokens":32}}}"""
     assertEquals(
-      decode[OpenAiClient.Response](body).toOption.get.completion.map(_.usage),
+      answer(OpenAiApi, body).map(_.usage),
       Right(Some(Usage(40, 2, 32))),
     )
 
@@ -255,32 +246,27 @@ class CacheSuite extends FunSuite:
          "usageMetadata":{"promptTokenCount":40,"candidatesTokenCount":2,
                           "cachedContentTokenCount":32}}"""
     assertEquals(
-      decode[GeminiClient.Response](body).toOption.get.completion.map(_.usage),
+      answer(GeminiApi, body).map(_.usage),
       Right(Some(Usage(40, 2, 32))),
     )
 
-  /**
-    * A client which answers only a request whose body satisfies the given test,
-    * and refuses any other, so that a warm which succeeds was sent as the test
-    * expects.
-    */
+  /** A client answering `body` to the requests it accepts, refusing others. */
   private def expecting
-    (config: LlmConfig, reply: String)
-    (test: Json => Boolean)
+    (config: LlmConfig, body: String)
+    (accepts: Json => Boolean)
     : LlmClient[IO] = LlmClient[IO](
     config,
     BackendStub(CatsMonadAsyncError[IO])
       .whenRequestMatches(request =>
         request.body match
-          case StringBody(body, _, _) => test(json(body))
+          case StringBody(sent, _, _) => accepts(json(sent))
           case _                      => false,
       )
-      .thenRespond(ResponseStub.adjust(reply, StatusCode.Ok))
+      .thenRespond(ResponseStub.adjust(body, StatusCode.Ok))
       .whenAnyRequest
       .thenRespond(ResponseStub.adjust("unexpected", StatusCode.BadRequest)),
   )
 
-  /** Whether a request body carries only the chat's cacheable prefix. */
   private def prefixOnly(body: Json): Boolean =
     val sent = body.noSpaces
     sent.contains("A long document.") && !sent.contains("A question about it.")
@@ -300,9 +286,32 @@ class CacheSuite extends FunSuite:
       Right(Some(Usage(900, 0))),
     )
 
+  test("a wrapped client warms as the client it wraps does"):
+    val warming = expecting(
+      config,
+      """{"content":[],"stop_reason":"max_tokens"}""",
+    )(body =>
+      body.hcursor.get[Int]("max_tokens").toOption.contains(0) &&
+      prefixOnly(body),
+    )
+    val refusing = new (IO ~> IO):
+      override def apply[A](request: IO[A]): IO[A] =
+        IO.raiseError(Exception("Refused."))
+    assert(
+      new LlmClient.Forwarding(warming) {}
+        .warm(chat)
+        .attempt
+        .unsafeRunSync()
+        .isRight,
+    )
+    assert(
+      warming.mapK(FunctionK.id).warm(chat).attempt.unsafeRunSync().isRight,
+    )
+    assert(warming.mapK(refusing).warm(chat).attempt.unsafeRunSync().isLeft)
+
   test("other providers warm a prefix asking for as little as they allow"):
     val warming = expecting(
-      config.copy(provider = LlmProvider.OpenAi),
+      config.copy(model = LlmModel.Gpt5),
       """{"choices":[{"message":{"content":""},"finish_reason":"length"}],
          "usage":{"prompt_tokens":900,"completion_tokens":1}}""",
     )(body =>
@@ -311,7 +320,7 @@ class CacheSuite extends FunSuite:
     )
     assert(warming.warm(chat).attempt.unsafeRunSync().isRight)
 
-  /** A chat caching its system message alone, as a breakpoint opening it does. */
+  /** A chat whose leading breakpoint caches the system message alone. */
   private val briefed = Chat()
     .withSystem("A long document.")
     .user(
@@ -320,8 +329,8 @@ class CacheSuite extends FunSuite:
     )
 
   /**
-    * Whether a request body carries only the system message of [[briefed]], and
-    * messages each saying something, as every provider requires.
+    * Whether a body carries only [[briefed]]'s system message, with each
+    * message under `messages` saying something in its `parts`.
     */
   private def briefOnly
     (
@@ -362,14 +371,14 @@ class CacheSuite extends FunSuite:
         .contains(Json.arr(marked("A long document."))),
     )
     val openAi = expecting(
-      config.copy(provider = LlmProvider.OpenAi),
+      config.copy(model = LlmModel.Gpt5),
       """{"choices":[{"message":{"content":""},"finish_reason":"length"}]}""",
     )(body =>
       briefOnly(body, "messages", "content") &&
       body.hcursor.downField("messages").downN(1).succeeded,
     )
     val gemini = expecting(
-      config.copy(provider = LlmProvider.Gemini),
+      config.copy(model = LlmModel.Gemini2_5Flash),
       """{"candidates":[{"content":{"parts":[{"text":""}]},
          "finishReason":"MAX_TOKENS"}]}""",
     )(briefOnly(_, "contents", "parts"))

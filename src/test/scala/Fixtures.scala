@@ -1,18 +1,14 @@
 package com.alecdorrington.iris
 
 import io.circe.Json
-import io.circe.parser.parse
+import io.circe.parser.{decode, parse}
 
-/** What the suites share. */
 object Fixtures:
 
-  /** A configuration to build adapters from, sending nowhere real. */
-  val config: LlmConfig = LlmConfig(
-    LlmProvider.Anthropic,
-    "key",
-    "model-x",
-    512,
-  )
+  val config: LlmConfig = LlmConfig(LlmModel.ClaudeHaiku4_5, "key", 512)
 
-  /** Parses JSON that a test knows to be well formed. */
   def json(body: String): Json = parse(body).toOption.get
+
+  /** What a provider makes of a response body that a test knows it can read. */
+  def answer(api: ProviderApi, body: String): Either[LlmError, Reply] =
+    decode[Either[LlmError, Reply]](body)(using api.replies).toOption.get
