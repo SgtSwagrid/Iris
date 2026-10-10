@@ -1,6 +1,5 @@
 package com.alecdorrington.iris
 
-import cats.MonadThrow
 import cats.syntax.all.*
 import io.circe.{Decoder, Encoder, Json}
 import io.circe.parser.decode
@@ -12,55 +11,7 @@ import sttp.model.Uri
 /** Shared HTTP plumbing for the JSON APIs of all providers. */
 private[iris] object JsonHttp:
 
-  /**
-    * Sends a JSON request, decodes the provider's response body as `R`, and
-    * extracts an `A` from it. Failed requests and malformed responses are
-    * raised as [[LlmError]]s.
-    *
-    * @param backend
-    *   The HTTP backend to send the request over.
-    *
-    * @param provider
-    *   The provider being spoken to, named in any error.
-    *
-    * @param timeout
-    *   How long to wait for the response before giving up.
-    *
-    * @param request
-    *   The request to send, with body and headers already applied, or why it
-    *   could not be made.
-    *
-    * @param extract
-    *   Converts a decoded response into what was asked for, or fails when it
-    *   carries nothing to convert.
-    *
-    * @return
-    *   An effect producing the extracted value.
-    */
-  def send[F[_] : MonadThrow, R : Decoder, A]
-    (
-      backend: Backend[F],
-      provider: LlmProvider,
-      timeout: FiniteDuration,
-    )
-    (
-      request: Either[
-        LlmError,
-        Request[Either[String, String]],
-      ],
-    )
-    (extract: R => Either[LlmError, A])
-    : F[A] = MonadThrow[F]
-    .fromEither(request)
-    .flatMap(_.readTimeout(timeout).send(backend))
-    .flatMap: response =>
-      MonadThrow[F].fromEither(parse[R](provider, response).flatMap(extract))
-
-  /**
-    * Resolves an API endpoint beneath the given origin. The origin may come
-    * from a host's own configuration, so one which is not a URL fails here
-    * rather than throwing, and the path is encoded rather than interpolated.
-    */
+  /** Resolves an endpoint beneath an origin, failing on one that is no URL. */
   def endpoint
     (
       provider: LlmProvider,
@@ -74,15 +25,7 @@ private[iris] object JsonHttp:
       _.addPath(path),
     )
 
-  /** A JSON request posting the given body to the given endpoint. */
-  def post(endpoint: Uri, body: String): Request[Either[String, String]] =
-    basicRequest.post(endpoint).body(body).contentType("application/json")
-
-  /**
-    * Refuses a chat with nothing in it to answer, or with a message saying
-    * nothing, both of which every provider rejects, before a request is spent
-    * discovering as much.
-    */
+  /** Refuses an empty chat, or one with a message of breakpoints alone. */
   def answerable(provider: LlmProvider, chat: Chat): Either[LlmError, Unit] =
     for
       _ <- Either.cond(
@@ -94,7 +37,7 @@ private[iris] object JsonHttp:
         ),
       )
       _ <- Either.cond(
-        !chat.messages.exists(_.saysNothing),
+        !chat.messages.exists(_.silent),
         (),
         LlmError.Unsendable(
           provider.displayName,
@@ -104,49 +47,49 @@ private[iris] object JsonHttp:
     yield ()
 
   /**
-    * A JSON object of the given fields, leaving out any which is null, which is
-    * how whatever a request does not set is omitted. Only the fields themselves
-    * are: a null within one, as in a tool's schema or the arguments a model
-    * gave one, is part of its value, and is sent as it is.
+    * A JSON object of the fields, leaving out null ones. Nulls nested inside a
+    * field, as in a tool's schema, are values and are kept.
     */
-  def obj(fields: (String, Json)*): Json = Json.obj(fields*).dropNullValues
+  def objectOf(fields: (String, Json)*): Json = Json.obj(fields*).dropNullValues
 
-  /** Serialises the given fields as a request body, as [[obj]] does. */
-  def requestBody(fields: (String, Json)*): String = obj(fields*).noSpaces
+  def body(fields: (String, Json)*): String = objectOf(fields*).noSpaces
 
-  /** Serialises a list for a request body, omitted when empty. */
   def unlessEmpty[A : Encoder](items: List[A]): Json = Option
     .when(items.nonEmpty)(items)
     .asJson
 
-  /**
-    * The failure of an unsuccessful response, carrying its body and how long
-    * the provider asked us to wait, where it said.
-    */
+  /** The text of the parts joined, where they are text alone. */
+  def plain(parts: Seq[Part]): Option[String] =
+    val texts = parts.collect:
+      case Part.Text(text) => text
+    Option.when(parts.forall(_.isInstanceOf[Part.Text]))(texts.mkString)
+
+  /** A tool's declaration, its schema under the field the provider reads. */
+  def declared(tool: Tool, schema: String): Json = Json.obj(
+    "name"        -> tool.name.asJson,
+    "description" -> tool.description.asJson,
+    schema        -> tool.parameters,
+  )
+
   def unsuccessful
     (
       provider: LlmProvider,
       response: Response[?],
       detail: String,
     )
-    : LlmError = LlmError.Http(
+    : LlmError = LlmError.Unsuccessful(
     provider.displayName,
     response.code,
     retryAfter(response.header("Retry-After")),
     detail,
   )
 
-  /**
-    * How long a provider asked us to wait, where it said so in seconds. The
-    * header may instead name a date, which is left unread: a host which cares
-    * that much can read the header itself, and one which does not is better off
-    * with nothing than with a number this got wrong.
-    */
+  /** The `Retry-After` delay, where given in seconds; a date is not read. */
   private[iris] def retryAfter(header: Option[String]): Option[FiniteDuration] =
     header.map(_.trim).flatMap(_.toIntOption).filter(_ >= 0).map(_.seconds)
 
-  /** Decodes a response body, mapping failures to [[LlmError]]s. */
-  private def parse[R : Decoder]
+  /** Decodes a response's body, failing on an unsuccessful or unreadable one. */
+  def parse[R : Decoder]
     (
       provider: LlmProvider,
       response: Response[Either[String, String]],
